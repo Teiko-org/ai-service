@@ -2,9 +2,12 @@ import logging
 
 from fastapi import APIRouter, Request, HTTPException
 
-from app.api.deps import sanitize_input, check_prompt_injection, validate_auth_token
-from app.core.assistant import CarambolosAssistant
+from app.api.deps import sanitize_input, check_prompt_injection, check_content_policy, validate_auth_token
+from app.core.assistant import CarambolosAssistant, RateLimitError
+from app.core.cache import cache
 from app.core.limiter import limiter
+from app.core.model_manager import model_manager
+from app.core.sessions import session_store
 from app.models.schemas import (
     AskRequest,
     AskResponse,
@@ -32,16 +35,30 @@ async def ask_question(body: AskRequest, request: Request):
 
     question = sanitize_input(body.question)
     check_prompt_injection(question)
+    check_content_policy(question)
+
+    session = session_store.get_or_create(body.session_id)
+    history = session_store.get_history(session.id, limit=10)
 
     assistant = CarambolosAssistant(auth_token=token)
 
     try:
-        result = await assistant.ask(question)
+        result = await assistant.ask(question, history=history)
+    except RateLimitError as exc:
+        logger.warning("Rate limit Gemini: %s", exc)
+        raise HTTPException(status_code=429, detail=str(exc))
     except Exception as exc:
         logger.error("Erro no assistente: %s", exc)
         raise HTTPException(status_code=500, detail="Erro ao processar a pergunta.")
 
-    return AskResponse(answer=result["answer"], tools_used=result["tools_used"])
+    session_store.append(session.id, "user", question)
+    session_store.append(session.id, "assistant", result["answer"])
+
+    return AskResponse(
+        answer=result["answer"],
+        tools_used=result["tools_used"],
+        session_id=session.id,
+    )
 
 
 @router.post("/insights", response_model=InsightsResponse)
@@ -49,10 +66,19 @@ async def ask_question(body: AskRequest, request: Request):
 async def generate_insights(body: InsightRequest, request: Request):
     token = await validate_auth_token(request)
 
+    cache_key = f"insights:{body.context}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        logger.info("Insights servidos do cache para contexto: %s", body.context)
+        return cached
+
     assistant = CarambolosAssistant(auth_token=token)
 
     try:
         raw_insights = await assistant.generate_insights(body.context)
+    except RateLimitError as exc:
+        logger.warning("Rate limit Gemini (insights): %s", exc)
+        raise HTTPException(status_code=429, detail=str(exc))
     except Exception as exc:
         logger.error("Erro ao gerar insights: %s", exc)
         raise HTTPException(status_code=500, detail="Erro ao gerar insights.")
@@ -67,7 +93,9 @@ async def generate_insights(body: InsightRequest, request: Request):
         for i in raw_insights
     ]
 
-    return InsightsResponse(insights=insights)
+    response = InsightsResponse(insights=insights)
+    cache.set(cache_key, response, ttl=300)
+    return response
 
 
 SUGGESTED_PROMPTS = [
@@ -114,8 +142,8 @@ SUGGESTED_PROMPTS = [
     SuggestedPrompt(
         label="Principais clientes",
         prompt=(
-            "Quem sao os principais clientes da confeitaria? "
-            "Quantos pedidos os clientes mais frequentes fizeram?"
+            "Com base nos pedidos recentes, quem sao os clientes que mais fizeram pedidos? "
+            "Liste os nomes dos clientes mais frequentes com a quantidade de pedidos de cada um."
         ),
         icon="users",
     ),
@@ -125,3 +153,8 @@ SUGGESTED_PROMPTS = [
 @router.get("/suggested-prompts", response_model=SuggestedPromptsResponse)
 async def get_suggested_prompts():
     return SuggestedPromptsResponse(prompts=SUGGESTED_PROMPTS)
+
+
+@router.get("/models-status")
+async def get_models_status():
+    return model_manager.get_status()

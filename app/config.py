@@ -1,9 +1,16 @@
 from pydantic_settings import BaseSettings
 
 
+FALLBACK_MODELS = [
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+]
+
+
 class Settings(BaseSettings):
     gemini_api_key: str
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-2.5-flash-lite"
     carambolos_api_url: str = "http://localhost:8080"
     allowed_origins: str = "http://localhost:8081,http://localhost:19006"
     log_level: str = "INFO"
