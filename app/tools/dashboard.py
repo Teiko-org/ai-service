@@ -46,8 +46,10 @@ DECLARATIONS = [
     genai.types.FunctionDeclaration(
         name="get_recent_orders",
         description=(
-            "Retorna os 50 pedidos mais recentes com dados do cliente, "
-            "status, valor e tipo de entrega."
+            "Retorna os 50 pedidos mais recentes com nome do cliente, "
+            "status, valor e tipo de entrega. Use para identificar "
+            "clientes frequentes, analisar padroes de pedidos e "
+            "gerar ranking de clientes por quantidade de pedidos."
         ),
         parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
     ),

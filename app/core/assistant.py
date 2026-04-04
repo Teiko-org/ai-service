@@ -1,28 +1,92 @@
 import asyncio
 import json
 import logging
+import re
 
 import google.genai as genai
 
 from app.config import settings
 from app.core.gemini import get_client
+from app.core.model_manager import model_manager
 from app.core.prompts import SYSTEM_PROMPT, INSIGHTS_PROMPT
 from app.tools.registry import TOOL_DECLARATIONS, execute_tool
 
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 5
+MAX_FALLBACK_ATTEMPTS = 3
+
+_RETRY_DELAY_RE = re.compile(r"retryDelay.*?(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
+
+
+class RateLimitError(RuntimeError):
+    """All Gemini models quota exceeded."""
+
+
+def _extract_retry_seconds(exc: genai.errors.APIError) -> float | None:
+    match = _RETRY_DELAY_RE.search(str(exc))
+    return float(match.group(1)) if match else None
 
 
 class CarambolosAssistant:
 
     def __init__(self, auth_token: str | None = None):
         self.client = get_client()
-        self.model = settings.gemini_model
         self.backend_url = settings.carambolos_api_url
         self.auth_token = auth_token
 
-    async def ask(self, question: str) -> dict:
+    def _build_history_contents(self, history: list[dict]) -> list:
+        contents = []
+        for msg in history:
+            role = "user" if msg["role"] == "user" else "model"
+            contents.append(
+                genai.types.Content(
+                    role=role,
+                    parts=[genai.types.Part.from_text(text=msg["content"])],
+                )
+            )
+        return contents
+
+    async def _generate_with_fallback(self, contents, config) -> tuple:
+        """Try generating content, falling back to other models on 429/404."""
+        model = model_manager.get_model()
+        last_exc = None
+
+        for attempt in range(MAX_FALLBACK_ATTEMPTS):
+            try:
+                logger.info("Usando modelo: %s (tentativa %d)", model, attempt + 1)
+                response = await self.client.aio.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=config,
+                )
+                return response, model
+            except genai.errors.APIError as exc:
+                last_exc = exc
+
+                if exc.code == 429:
+                    retry_after = _extract_retry_seconds(exc)
+                    fallback = model_manager.mark_rate_limited(model, retry_after)
+                elif exc.code == 404:
+                    logger.warning("Modelo %s nao encontrado, pulando...", model)
+                    fallback = model_manager.mark_rate_limited(model, 3600)
+                else:
+                    raise RuntimeError(f"Falha na comunicacao com a IA: {exc.message}") from exc
+
+                if fallback is None:
+                    raise RateLimitError(
+                        "Todos os modelos estao temporariamente indisponiveis. "
+                        "Aguarde um momento e tente novamente."
+                    ) from exc
+
+                model = fallback
+
+        raise RateLimitError(
+            "Todos os modelos estao temporariamente indisponiveis. "
+            "Aguarde um momento e tente novamente."
+        ) from last_exc
+
+    async def ask(self, question: str, history: list[dict] | None = None) -> dict:
         tools_used: list[str] = []
 
         config = genai.types.GenerateContentConfig(
@@ -30,15 +94,15 @@ class CarambolosAssistant:
             tools=[genai.types.Tool(function_declarations=TOOL_DECLARATIONS)],
         )
 
-        try:
-            response = await self.client.aio.models.generate_content(
-                model=self.model,
-                contents=question,
-                config=config,
+        contents = self._build_history_contents(history or [])
+        contents.append(
+            genai.types.Content(
+                role="user",
+                parts=[genai.types.Part.from_text(text=question)],
             )
-        except genai.errors.APIError as exc:
-            logger.error("Gemini API error: %s", exc)
-            raise RuntimeError(f"Falha na comunicacao com a IA: {exc.message}") from exc
+        )
+
+        response, model = await self._generate_with_fallback(contents, config)
 
         for _ in range(MAX_TOOL_ROUNDS):
             if not response.candidates or not response.candidates[0].content.parts:
@@ -70,25 +134,12 @@ class CarambolosAssistant:
                     )
                 )
 
-            try:
-                response = await self.client.aio.models.generate_content(
-                    model=self.model,
-                    contents=[
-                        genai.types.Content(
-                            role="user",
-                            parts=[genai.types.Part.from_text(question)],
-                        ),
-                        response.candidates[0].content,
-                        genai.types.Content(
-                            role="user",
-                            parts=function_responses,
-                        ),
-                    ],
-                    config=config,
-                )
-            except genai.errors.APIError as exc:
-                logger.error("Gemini API error (tool loop): %s", exc)
-                raise RuntimeError(f"Falha na comunicacao com a IA: {exc.message}") from exc
+            contents.append(response.candidates[0].content)
+            contents.append(
+                genai.types.Content(role="user", parts=function_responses)
+            )
+
+            response, model = await self._generate_with_fallback(contents, config)
 
         if not response.candidates or not response.candidates[0].content.parts:
             return {"answer": "Nao foi possivel gerar uma resposta no momento.", "tools_used": tools_used}
@@ -143,15 +194,7 @@ class CarambolosAssistant:
             system_instruction=SYSTEM_PROMPT,
         )
 
-        try:
-            response = await self.client.aio.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=config,
-            )
-        except genai.errors.APIError as exc:
-            logger.error("Gemini API error (insights): %s", exc)
-            raise RuntimeError(f"Falha na comunicacao com a IA: {exc.message}") from exc
+        response, _ = await self._generate_with_fallback(prompt, config)
 
         if not response.candidates or not response.candidates[0].content.parts:
             return [{"type": "alert", "priority": "high", "title": "Erro", "message": "Nao foi possivel gerar insights."}]
