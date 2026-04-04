@@ -1,9 +1,14 @@
 from pydantic import BaseModel, Field
 
 
+class ChatMessage(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant)$")
+    content: str
+
+
 class AskRequest(BaseModel):
     question: str = Field(
-        ..., min_length=3, max_length=1000,
+        ..., min_length=1, max_length=1000,
         description="Pergunta em linguagem natural sobre o negocio"
     )
     session_id: str | None = None
@@ -12,6 +17,7 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     tools_used: list[str]
+    session_id: str
 
 
 class InsightRequest(BaseModel):
