@@ -142,8 +142,8 @@ SUGGESTED_PROMPTS = [
     SuggestedPrompt(
         label="Principais clientes",
         prompt=(
-            "Quem sao os principais clientes da confeitaria? "
-            "Quantos pedidos os clientes mais frequentes fizeram?"
+            "Com base nos pedidos recentes, quem sao os clientes que mais fizeram pedidos? "
+            "Liste os nomes dos clientes mais frequentes com a quantidade de pedidos de cada um."
         ),
         icon="users",
     ),
