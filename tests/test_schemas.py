@@ -12,7 +12,17 @@ def test_ask_request_valid():
 
 def test_ask_request_too_short():
     with pytest.raises(ValidationError):
-        AskRequest(question="ab")
+        AskRequest(question="")
+
+
+def test_ask_request_single_char_valid():
+    req = AskRequest(question="X")
+    assert req.question == "X"
+
+
+def test_ask_request_with_session():
+    req = AskRequest(question="Oi", session_id="abc-123")
+    assert req.session_id == "abc-123"
 
 
 def test_ask_request_too_long():
