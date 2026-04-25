@@ -1,4 +1,5 @@
 import logging
+import re
 
 from fastapi import APIRouter, Request, HTTPException
 
@@ -11,6 +12,7 @@ from app.core.sessions import session_store
 from app.models.schemas import (
     AskRequest,
     AskResponse,
+    Attachment,
     InsightRequest,
     InsightsResponse,
     Insight,
@@ -18,9 +20,19 @@ from app.models.schemas import (
     SuggestedPromptsResponse,
     HealthResponse,
 )
+from app.tools.reports import REPORT_TOOL_NAME, REPORT_ENDPOINT, REPORT_FILENAME
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
+
+_REPORT_INTENT_RE = re.compile(
+    r"\b(relat[oó]rio|pdf|exportar|exporta[cç][aã]o|documento|baixar|download|arquivo|imprimir)\b",
+    re.IGNORECASE,
+)
+
+
+def _user_requested_report(question: str) -> bool:
+    return bool(_REPORT_INTENT_RE.search(question or ""))
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -54,10 +66,31 @@ async def ask_question(body: AskRequest, request: Request):
     session_store.append(session.id, "user", question)
     session_store.append(session.id, "assistant", result["answer"])
 
+    attachments: list[Attachment] = []
+    should_attach_report = (
+        REPORT_TOOL_NAME in result["tools_used"]
+        or _user_requested_report(question)
+    )
+    if should_attach_report:
+        if REPORT_TOOL_NAME not in result["tools_used"]:
+            logger.info(
+                "Modelo nao chamou %s mas pergunta pediu relatorio; anexando PDF por fallback.",
+                REPORT_TOOL_NAME,
+            )
+        attachments.append(
+            Attachment(
+                type="pdf_report",
+                label="Baixar relatório de insights",
+                endpoint=REPORT_ENDPOINT,
+                filename=REPORT_FILENAME,
+            )
+        )
+
     return AskResponse(
         answer=result["answer"],
         tools_used=result["tools_used"],
         session_id=session.id,
+        attachments=attachments,
     )
 
 
@@ -146,6 +179,11 @@ SUGGESTED_PROMPTS = [
             "Liste os nomes dos clientes mais frequentes com a quantidade de pedidos de cada um."
         ),
         icon="users",
+    ),
+    SuggestedPrompt(
+        label="Gerar relatório PDF",
+        prompt="Gere um relatorio em PDF com os insights de pedidos.",
+        icon="file-down",
     ),
 ]
 

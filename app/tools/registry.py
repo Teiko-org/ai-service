@@ -1,7 +1,7 @@
 import logging
 
 from app.core.http_client import get_http_client
-from app.tools import dashboard, orders, products, production
+from app.tools import dashboard, orders, products, production, reports
 
 logger = logging.getLogger(__name__)
 
@@ -10,6 +10,7 @@ TOOL_DECLARATIONS = (
     + orders.DECLARATIONS
     + products.DECLARATIONS
     + production.DECLARATIONS
+    + reports.DECLARATIONS
 )
 
 _EXECUTORS = {
@@ -17,6 +18,7 @@ _EXECUTORS = {
     **{d.name: orders.execute for d in orders.DECLARATIONS},
     **{d.name: products.execute for d in products.DECLARATIONS},
     **{d.name: production.execute for d in production.DECLARATIONS},
+    **{d.name: reports.execute for d in reports.DECLARATIONS},
 }
 
 

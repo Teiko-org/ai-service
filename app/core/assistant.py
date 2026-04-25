@@ -142,10 +142,28 @@ class CarambolosAssistant:
             response, model = await self._generate_with_fallback(contents, config)
 
         if not response.candidates or not response.candidates[0].content.parts:
-            return {"answer": "Nao foi possivel gerar uma resposta no momento.", "tools_used": tools_used}
+            answer = self._fallback_answer(tools_used)
+            return {"answer": answer, "tools_used": tools_used}
 
-        answer = response.candidates[0].content.parts[0].text
+        text_parts = [
+            part.text
+            for part in response.candidates[0].content.parts
+            if getattr(part, "text", None)
+        ]
+        answer = "\n".join(text_parts).strip()
+
+        if not answer:
+            answer = self._fallback_answer(tools_used)
+
         return {"answer": answer, "tools_used": tools_used}
+
+    @staticmethod
+    def _fallback_answer(tools_used: list[str]) -> str:
+        from app.tools.reports import REPORT_TOOL_NAME
+
+        if REPORT_TOOL_NAME in tools_used:
+            return "Pronto, gerei o relatorio de insights. Clique no botao abaixo para baixar o PDF."
+        return "Nao foi possivel gerar uma resposta no momento. Tente reformular a pergunta."
 
     async def generate_insights(self, context: str = "dashboard_main") -> list[dict]:
         tool_sets = {
