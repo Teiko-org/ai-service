@@ -14,10 +14,18 @@ class AskRequest(BaseModel):
     session_id: str | None = None
 
 
+class Attachment(BaseModel):
+    type: str = Field(..., description="Tipo do anexo: 'pdf_report', etc.")
+    label: str = Field(..., description="Texto exibido no botao do frontend.")
+    endpoint: str = Field(..., description="Caminho relativo no backend Carambolos.")
+    filename: str = Field(..., description="Nome sugerido do arquivo no download.")
+
+
 class AskResponse(BaseModel):
     answer: str
     tools_used: list[str]
     session_id: str
+    attachments: list[Attachment] = Field(default_factory=list)
 
 
 class InsightRequest(BaseModel):
