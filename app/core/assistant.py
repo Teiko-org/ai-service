@@ -86,6 +86,50 @@ class CarambolosAssistant:
             "Aguarde um momento e tente novamente."
         ) from last_exc
 
+    async def _recover_text_after_tools(self, contents: list) -> str:
+        """Se o modelo devolveu tools mas nao texto, uma chamada extra sem tools forca a resposta."""
+        recovery_contents = [
+            *contents,
+            genai.types.Content(
+                role="user",
+                parts=[
+                    genai.types.Part.from_text(
+                        text=(
+                            "Os dados ja estao na conversa acima (resultados das "
+                            "funcoes). Escreva AGORA a resposta final em portugues "
+                            "para o usuario, com base nesses dados. NAO invoque "
+                            "novas funcoes. NAO use Markdown."
+                        )
+                    )
+                ],
+            ),
+        ]
+        recovery_cfg = genai.types.GenerateContentConfig(
+            system_instruction=(
+                "Voce e a Kuroko, assistente da Carambolos. Os dados ja foram "
+                "obtidos e aparecem como function_response na conversa. "
+                "Produza somente texto final para o usuario. E proibido chamar "
+                "ferramentas. Se houver campo error no JSON, explique de forma "
+                "clara. NAO use Markdown."
+            ),
+        )
+        try:
+            response, _ = await self._generate_with_fallback(
+                recovery_contents, recovery_cfg
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Recuperacao pos-tools falhou: %s", exc)
+            return ""
+
+        if not response.candidates or not response.candidates[0].content.parts:
+            return ""
+        text_parts = [
+            part.text
+            for part in response.candidates[0].content.parts
+            if getattr(part, "text", None)
+        ]
+        return "\n".join(text_parts).strip()
+
     async def ask(self, question: str, history: list[dict] | None = None) -> dict:
         tools_used: list[str] = []
 
@@ -152,6 +196,9 @@ class CarambolosAssistant:
         ]
         answer = "\n".join(text_parts).strip()
 
+        if not answer and tools_used:
+            answer = await self._recover_text_after_tools(contents)
+
         if not answer:
             answer = self._fallback_answer(tools_used)
 
@@ -163,6 +210,13 @@ class CarambolosAssistant:
 
         if REPORT_TOOL_NAME in tools_used:
             return "Pronto, gerei o relatorio de insights. Clique no botao abaixo para baixar o PDF."
+        if "get_recent_orders" in tools_used:
+            return (
+                "Os pedidos recentes foram consultados, mas a resposta em texto "
+                "nao veio na primeira tentativa. Envie de novo a mesma pergunta "
+                "ou tente em uma linha: "
+                "'Quem sao os 5 clientes que mais aparecem nos pedidos recentes?'"
+            )
         return "Nao foi possivel gerar uma resposta no momento. Tente reformular a pergunta."
 
     async def generate_insights(self, context: str = "dashboard_main") -> list[dict]:

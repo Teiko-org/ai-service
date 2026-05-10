@@ -10,8 +10,9 @@ Nucleo do servico: client Gemini, loop de function calling com fallback automati
 | `gemini.py`      | Singleton do `genai.Client` (inicializado com API key)               |
 | `prompts.py`     | SYSTEM_PROMPT e INSIGHTS_PROMPT (persona + regras + politica de conteudo) |
 | `model_manager.py` | Gerenciador de modelos com fallback automatico e cooldown por modelo |
+| `alerts.py`      | Heuristicas de alertas V2, cache e refresh em background (lifespan)  |
 | `sessions.py`    | SessionStore in-memory com TTL, cleanup automatico e historico       |
-| `cache.py`       | SimpleCache thread-safe com TTL (usado para insights)                |
+| `cache.py`       | SimpleCache thread-safe com TTL (usado para insights e alertas)     |
 | `http_client.py` | Singleton `httpx.AsyncClient` com lifecycle (cleanup no shutdown)    |
 | `limiter.py`     | Instancia do slowapi Limiter (importada pelas routes)                |
 
@@ -33,10 +34,10 @@ O `_generate_with_fallback()` encapsula toda chamada ao Gemini:
 
 1. `model_manager.get_model()` retorna o modelo de maior prioridade disponivel
 2. Se o Gemini retorna 429 (rate limit), extrai `retry_after` e marca o modelo em cooldown
-3. `model_manager.mark_rate_limited()` encontra o proximo modelo disponivel
-4. Se retorna 404 (modelo invalido), marca com cooldown de 1 hora e tenta o proximo
-5. Ate `MAX_FALLBACK_ATTEMPTS=3` tentativas por chamada
-6. Se todos os modelos estiverem indisponiveis, levanta `RateLimitError`
+3. `model_manager.mark_rate_limited()` escolhe outro modelo: primeiro sem cooldown; se **todos** estiverem em cooldown, **libera o que expira mais cedo** e devolve esse nome para nova tentativa (projeto academico / free tier)
+4. Se retorna 404 (modelo invalido), marca com cooldown longo e tenta o proximo
+5. Ate `MAX_FALLBACK_ATTEMPTS=3` tentativas por chamada — se ainda falhar, levanta `RateLimitError`
+6. `RateLimitError` tambem se `mark_rate_limited` retornar `None` (caso limite, ex.: lista de modelos invalida)
 
 Modelos disponiveis (ordem de prioridade, definidos em `config.py`):
 - `gemini-2.5-flash-lite` — 15 RPM, 1.000 RPD (principal)
@@ -77,6 +78,7 @@ Modelos disponiveis (ordem de prioridade, definidos em `config.py`):
 - `response.candidates` pode ser vazio (safety filter, quota) — sempre verificar antes de acessar
 - Insights JSON do Gemini as vezes vem envolto em ```json ... ``` — o parser em assistant.py trata
 - `MAX_TOOL_ROUNDS=5` existe pra evitar loop infinito
+- Apos tools, se a resposta vier sem texto, `assistant` pode chamar `_recover_text_after_tools` (custo extra de uma geracao)
 - Sessoes sao in-memory — restart do servico perde todas as sessoes (aceitavel para projeto academico)
 - Cache e in-memory — restart do servico limpa o cache (mesma razao acima)
 - Cooldowns do model_manager tambem resetam no restart

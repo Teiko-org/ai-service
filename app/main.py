@@ -8,6 +8,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
 from app.api.routes import router
+from app.core.alerts import start_background_task, stop_background_task
 from app.core.http_client import close_http_client
 from app.core.limiter import limiter
 
@@ -19,8 +20,12 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    yield
-    await close_http_client()
+    start_background_task()
+    try:
+        yield
+    finally:
+        await stop_background_task()
+        await close_http_client()
 
 
 app = FastAPI(

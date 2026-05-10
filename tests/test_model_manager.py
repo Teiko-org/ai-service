@@ -49,11 +49,13 @@ def test_mark_rate_limited_skips_other_cooldowns(mm):
     assert fallback == "model-c"
 
 
-def test_all_models_exhausted_returns_none(mm):
+def test_all_models_in_cooldown_returns_earliest_fallback(mm):
+    """Quando todos estao em cooldown, libera o que expira primeiro (nova tentativa)."""
     mm.mark_rate_limited("model-a")
     mm.mark_rate_limited("model-b")
     fallback = mm.mark_rate_limited("model-c")
-    assert fallback is None
+    assert fallback in ("model-a", "model-b")
+    assert mm.get_status()[fallback]["available"] is True
 
 
 def test_get_model_when_all_cooldown_returns_primary(mm):

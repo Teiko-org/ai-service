@@ -51,8 +51,30 @@ class ModelManager:
                     logger.info("Fallback para modelo: %s", fallback)
                     return fallback
 
-        logger.error("Nenhum modelo disponivel para fallback")
-        return None
+            others = [
+                (m, self._cooldowns.get(m, 0.0))
+                for m in self._models
+                if m != model
+            ]
+            if not others:
+                if len(self._models) == 1:
+                    logger.warning(
+                        "Apenas um modelo configurado; reduzindo cooldown para nova tentativa"
+                    )
+                    self._cooldowns[model] = now + min(cooldown, 12.0)
+                    return model
+                logger.error("Lista de modelos invalida para fallback")
+                return None
+
+            best_model, best_expires = min(others, key=lambda x: x[1])
+            wait = max(0.0, best_expires - now)
+            logger.warning(
+                "Todos em cooldown; liberando %s (expirava em %.0fs) para tentar de novo",
+                best_model,
+                wait,
+            )
+            self._cooldowns[best_model] = 0.0
+            return best_model
 
     def get_status(self) -> dict:
         now = time.time()

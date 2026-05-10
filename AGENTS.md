@@ -24,13 +24,14 @@ Este servico NAO acessa o banco diretamente. Toda leitura de dados passa pelas t
 
 ## Endpoints
 
-| Metodo | Rota                       | Rate Limit  | Auth    | Descricao                          |
-|--------|----------------------------|-------------|---------|-------------------------------------|
-| GET    | /api/v1/health             | 60/min      | Nao     | Health check                        |
-| POST   | /api/v1/ask                | 15/min      | Bearer  | Pergunta em linguagem natural       |
-| POST   | /api/v1/insights           | 10/min      | Bearer  | Insights proativos (com cache 5min) |
-| GET    | /api/v1/suggested-prompts  | 60/min      | Nao     | Prompts pre-definidos (pills)       |
-| GET    | /api/v1/models-status      | 60/min      | Nao     | Status/cooldown dos modelos Gemini  |
+| Metodo | Rota                       | Rate Limit  | Auth    | Descricao                                          |
+|--------|----------------------------|-------------|---------|----------------------------------------------------|
+| GET    | /api/v1/health             | 60/min      | Nao     | Health check                                       |
+| POST   | /api/v1/ask                | 15/min      | Bearer  | Pergunta em linguagem natural                      |
+| POST   | /api/v1/insights           | 10/min      | Bearer  | Insights proativos (com cache 5min)                |
+| GET    | /api/v1/alerts             | 30/min      | Bearer  | Alertas proativos (cache 30min, refresh em bg)     |
+| GET    | /api/v1/suggested-prompts  | 60/min      | Nao     | Prompts pre-definidos (pills)                      |
+| GET    | /api/v1/models-status      | 60/min      | Nao     | Status/cooldown dos modelos Gemini                 |
 
 ## Configuracao
 
@@ -61,7 +62,7 @@ Modelos de fallback definidos em `FALLBACK_MODELS` no `config.py`:
 1. Request chega → sanitize → check injection → check content policy → extract token
 2. SessionStore busca/cria sessao e carrega historico (ultimas 10 mensagens)
 3. `CarambolosAssistant.ask()` envia pergunta + historico + TOOL_DECLARATIONS ao Gemini
-4. `_generate_with_fallback()` tenta o modelo principal; se 429, tenta fallback automatico
+4. `_generate_with_fallback()` tenta o modelo principal; se 429/404, `mark_rate_limited` escolhe outro modelo (ou libera o de cooldown mais curto se todos estiverem bloqueados)
 5. Se resposta contem `function_call(s)` → registry despacha para executor correto
 6. Executor chama endpoint do backend Java via httpx compartilhado
 7. Resultado volta pro Gemini como function_response
@@ -78,6 +79,26 @@ Modelos de fallback definidos em `FALLBACK_MODELS` no `config.py`:
 5. Parseia resposta JSON (trata markdown code fences)
 6. Cacheia resultado e retorna
 
+## Alertas Proativos (V2 — /alerts)
+
+- Background task em `app/core/alerts.py` iniciada pelo lifespan da FastAPI
+- Roda a cada `DEFAULT_REFRESH_SECONDS` (30 min); resultado vai para o cache
+- Heuristicas (sem chamar Gemini, custo zero):
+  - **delivery (high)**: pedidos PENDENTES com entrega nas proximas 48h
+  - **production (medium)**: massas/recheios pendentes (limiar >= 5 itens)
+  - **cancellation (high)**: taxa de cancelamento >= 20% (com volume minimo)
+  - **batch (low/medium)**: fornada da vez com >= 80% de aproveitamento
+- Endpoint `/api/v1/alerts` serve do cache; aceita `?refresh=true` para recalcular sob demanda
+
+## Acoes via Chat (V2 — Agentic AI)
+
+Tools que mudam estado (mark_order_as_*) seguem o padrao two-step:
+1. Modelo chama com `confirmed=False` → tool retorna previa + `requires_confirmation: True`
+2. Modelo apresenta a previa e aguarda confirmacao explicita do usuario
+3. Modelo chama de novo com `confirmed=True` → tool executa o PATCH/POST
+
+Ver `app/tools/AGENTS.md` para detalhes.
+
 ## Anti-patterns
 
 - NUNCA acessar banco diretamente — toda leitura e via tools → backend Java
@@ -86,9 +107,31 @@ Modelos de fallback definidos em `FALLBACK_MODELS` no `config.py`:
 - NUNCA chamar `client.models.generate_content()` (sincrono) — usar `client.aio.models.generate_content()` (async)
 - NUNCA expor detalhes de erro do Gemini pro usuario final — logar e retornar mensagem generica
 
+## Smoke test (Backend + AI, sem abrir o app)
+
+Com backend Java e AI service no ar, na pasta `ai-service`:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\smoke_stack.py
+```
+
+Inclui checagem de integracao **AI → Java** via `GET /api/v1/alerts?refresh=true` (as heuristicas chamam tools que batem no backend). Para tambem validar **Gemini + tools** (consome quota):
+
+```powershell
+.\.venv\Scripts\python.exe scripts\smoke_stack.py --with-ask
+```
+
+Opcional: `SMOKE_BEARER` com JWT se quiser repetir o mesmo header que o app usaria para endpoints protegidos.
+
 ## Testes
 
 `pytest` com mocks. Rodar: `.venv/Scripts/python.exe -m pytest tests/ -v`
 - `test_deps.py` — Sanitizacao, deteccao de injection e guardrails de conteudo
 - `test_schemas.py` — Validacao Pydantic
 - `test_routes.py` — Endpoints com mock do CarambolosAssistant
+- `test_tools.py` — Registry, executores principais (dashboard) e tool de relatorio
+- `test_actions_tool.py` — Feature 1: fluxo two-step das acoes (PATCH com confirmacao) e WhatsApp
+- `test_deep_orders_tool.py` — Feature 2: filtros e detalhamento de pedidos
+- `test_batches_and_catalog_tools.py` — Features 3 e 5: fornadas e catalogo
+- `test_alerts.py` — Feature 4: heuristicas de alertas, cache e endpoint /alerts
+- `test_model_manager.py` — Fallback, cooldown e liberacao quando todos em cooldown

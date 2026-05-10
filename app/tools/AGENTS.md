@@ -9,6 +9,11 @@ Cada modulo neste diretorio define Function Declarations que o Gemini pode chama
    - `orders.py` — Pedidos agrupados por periodo, itens por periodo (tendencias)
    - `products.py` — KPIs de fornada (aproveitamento, valor, por periodo, por ID)
    - `production.py` — Massas/recheios pendentes, entregas proximas
+   - `reports.py` — Sinaliza geracao de PDF (tool sintetica, nao chama backend)
+   - `actions.py` — Acoes destrutivas (PATCH/POST) com confirmacao two-step (V2)
+   - `deep_orders.py` — Detalhes e filtros de pedidos via ResumoPedidoController (V2)
+   - `batches.py` — Gestao de fornadas (V2)
+   - `catalog.py` — Catalogo / cardapio (produtos cadastrados, decoracoes, tamanhos) (V2)
 
 2. Adicione a `FunctionDeclaration` na lista `DECLARATIONS`:
    ```python
@@ -28,7 +33,7 @@ Cada modulo neste diretorio define Function Declarations que o Gemini pode chama
    async def execute(name: str, args: dict, base_url: str, token: str | None, client: httpx.AsyncClient) -> dict:
    ```
 
-4. O `registry.py` auto-registra — basta importar o modulo novo la e adicionar ao `TOOL_DECLARATIONS` e `_EXECUTORS`.
+4. Atualize `registry.py`: importe o modulo novo, concatene as `DECLARATIONS` em `TOOL_DECLARATIONS` e registre os executores em `_EXECUTORS`.
 
 ## Contrato da funcao execute()
 
@@ -37,6 +42,16 @@ Cada modulo neste diretorio define Function Declarations que o Gemini pode chama
 - Status 204 do backend → retornar `{"data": [], "message": "Nenhum dado encontrado"}`
 - Erros sao capturados pelo registry — nao precisa try/except dentro do executor
 - Token Bearer e repassado ao backend via header Authorization
+
+## Padrao Two-Step Confirmation (tools de acao — V2)
+
+As tools que ALTERAM estado seguem o padrao agentic com confirmacao humana:
+
+1. Primeira chamada com `confirmed=False` (default): a tool NAO chama o backend. Retorna `requires_confirmation: True` + previa do pedido.
+2. O modelo apresenta a previa ao usuario e aguarda confirmacao explicita ("sim", "confirma").
+3. Segunda chamada com `confirmed=True`: a tool executa o PATCH/POST.
+
+O SYSTEM_PROMPT em `app/core/prompts.py` instrui o modelo a SEMPRE seguir esse fluxo. Tools puramente READ (`generate_whatsapp_message`, deep_orders, batches, catalog) nao precisam de confirmacao.
 
 ## Mapeamento tool → endpoint backend
 
@@ -73,9 +88,55 @@ Cada modulo neste diretorio define Function Declarations que o Gemini pode chama
 | get_pending_fillings        | GET /dashboard/recheios-pendentes         | —                  |
 | get_upcoming_deliveries     | GET /dashboard/pedidos-proximos-entrega   | diasProximos       |
 
+### reports.py
+| Tool                       | Comportamento                                            |
+|----------------------------|----------------------------------------------------------|
+| generate_insights_report   | Sinaliza PDF — frontend baixa /relatorios/insights       |
+
+### actions.py (V2 — two-step confirmation)
+| Tool                        | Endpoint backend                            | Confirmacao? |
+|-----------------------------|---------------------------------------------|--------------|
+| mark_order_as_paid          | PATCH /resumo-pedido/{id}/pago              | sim          |
+| mark_order_as_completed     | PATCH /resumo-pedido/{id}/concluido         | sim          |
+| mark_order_as_cancelled     | PATCH /resumo-pedido/{id}/cancelado         | sim          |
+| mark_order_as_pending       | PATCH /resumo-pedido/{id}/pendente          | sim          |
+| generate_whatsapp_message   | POST /resumo-pedido/mensagens               | nao (read)   |
+
+### deep_orders.py (V2)
+| Tool                        | Endpoint backend                                         | Params                |
+|-----------------------------|----------------------------------------------------------|-----------------------|
+| get_order_summary_by_id     | GET /resumo-pedido/{id}                                  | order_id              |
+| get_cake_order_details      | GET /resumo-pedido/pedido-bolo/detalhe/{id}              | order_id              |
+| get_batch_order_details     | GET /resumo-pedido/pedido-fornada/detalhe/{id}           | order_id              |
+| get_orders_by_status        | GET /resumo-pedido/status/{STATUS}                       | status                |
+| get_orders_by_delivery_date | GET /resumo-pedido/pedido-bolo/por-data-entrega          | dataEntrega, status?  |
+| get_orders_by_dough         | GET /resumo-pedido/pedido-bolo/por-massa/{massaId}       | dough_id, status?     |
+| get_orders_by_filling       | GET /resumo-pedido/pedido-bolo/por-recheio/{recheioId}   | filling_id, status?   |
+
+### batches.py (V2)
+| Tool                        | Endpoint backend                            | Params       |
+|-----------------------------|---------------------------------------------|--------------|
+| get_next_batch              | GET /fornadas/proxima                       | —            |
+| get_active_batches          | GET /fornadas                               | —            |
+| get_all_batches             | GET /fornadas/todas                         | —            |
+| get_batches_by_month        | GET /fornadas/com-itens                     | ano, mes     |
+| get_products_in_batch       | GET /fornadas/da-vez/produtos/{batchId}     | batch_id     |
+| get_latest_batch_products   | GET /fornadas/mais-recente/produtos         | —            |
+
+### catalog.py (V2)
+| Tool                       | Endpoint backend                | Params |
+|----------------------------|---------------------------------|--------|
+| get_registered_products    | GET /dashboard/produtosCadastrados | —    |
+| get_decorations            | GET /decoracoes                 | —      |
+| get_cake_sizes             | GET /bolos/tamanhos             | —      |
+| get_cake_formats           | GET /bolos/formatos             | —      |
+| get_doughs_catalog         | GET /bolos/massa                | —      |
+| get_fillings_catalog       | GET /bolos/recheio-unitario     | —      |
+
 ## Anti-patterns
 
 - NUNCA usar `httpx.AsyncClient()` direto — o client vem como parametro via registry
 - NUNCA retornar dados que nao vieram do backend — o Gemini nao deve receber dados inventados
 - Descricao da FunctionDeclaration deve ser precisa — o Gemini decide qual tool chamar baseado NELA
 - Nomes de tools em snake_case, parametros em snake_case (mapeados pra camelCase do backend dentro do executor)
+- Tools de acao SEMPRE precisam do parametro `confirmed` e do fluxo two-step — nunca executar PATCH/POST direto
