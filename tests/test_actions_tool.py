@@ -47,6 +47,22 @@ def _resp(status_code=200, json_payload=None, text_payload=None):
 
 
 @pytest.mark.asyncio
+async def test_mark_paid_accepts_pedido_hash_string_order_id():
+    """Modelo pode mandar order_id como string estilo #42 — normalizamos."""
+    preview = {"id": 42, "status": "PENDENTE"}
+    client = _make_client(get_resp=_resp(200, preview))
+
+    with patch("app.tools.registry.get_http_client", return_value=client):
+        result = await execute_tool(
+            "mark_order_as_paid", {"order_id": "#42"}, "http://x", "tok"
+        )
+
+    assert result["requires_confirmation"] is True
+    assert result["order_id"] == 42
+    assert "/resumo-pedido/42" in client.get.call_args[0][0]
+
+
+@pytest.mark.asyncio
 async def test_mark_paid_without_confirm_returns_preview():
     preview = {"id": 42, "cliente": "Ana", "status": "PENDENTE", "valor": 150.0}
     client = _make_client(get_resp=_resp(200, preview))

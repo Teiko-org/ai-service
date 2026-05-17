@@ -18,7 +18,7 @@ Este servico NAO acessa o banco diretamente. Toda leitura de dados passa pelas t
 
 - `app/api/` — Rotas HTTP e seguranca (deps.py). Sem AGENTS.md proprio, coberto por este node.
 - `app/core/` — Logica do assistente, client Gemini, prompts, sessoes, cache, gerenciador de modelos, rate limiter, http client compartilhado. Ver `app/core/AGENTS.md`.
-- `app/tools/` — Function Declarations do Gemini mapeadas a endpoints do backend. Ver `app/tools/AGENTS.md`.
+- `app/tools/` — Function Declarations do Gemini mapeadas a endpoints do backend. Inclui `order_ref.py` (normaliza numero do pedido #X / pedido X para id do resumo). Ver `app/tools/AGENTS.md`.
 - `app/models/` — Schemas Pydantic (request/response). Arquivo unico, coberto por este node.
 - `tests/` — Testes com pytest. Mocks para Gemini, TestClient do FastAPI.
 
@@ -64,7 +64,7 @@ Modelos de fallback definidos em `FALLBACK_MODELS` no `config.py`:
 3. `CarambolosAssistant.ask()` envia pergunta + historico + TOOL_DECLARATIONS ao Gemini
 4. `_generate_with_fallback()` tenta o modelo principal; se 429/404, `mark_rate_limited` escolhe outro modelo (ou libera o de cooldown mais curto se todos estiverem bloqueados)
 5. Se resposta contem `function_call(s)` → registry despacha para executor correto
-6. Executor chama endpoint do backend Java via httpx compartilhado
+6. Executor chama endpoint do backend Java via httpx compartilhado (em `actions` e `deep_orders`, `order_id` e normalizado — ex.: `#42` e o mesmo resumo que `42`)
 7. Resultado volta pro Gemini como function_response
 8. Loop ate max 5 rounds ou Gemini responder com texto final
 9. Mensagens (user + assistant) sao salvas na sessao
@@ -135,3 +135,4 @@ Opcional: `SMOKE_BEARER` com JWT se quiser repetir o mesmo header que o app usar
 - `test_batches_and_catalog_tools.py` — Features 3 e 5: fornadas e catalogo
 - `test_alerts.py` — Feature 4: heuristicas de alertas, cache e endpoint /alerts
 - `test_model_manager.py` — Fallback, cooldown e liberacao quando todos em cooldown
+- `test_order_ref.py` — Parse de numero de pedido (Pedido #X, `pedido 42`, etc.) para id do resumo

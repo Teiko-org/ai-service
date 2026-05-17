@@ -2,6 +2,13 @@
 
 Cada modulo neste diretorio define Function Declarations que o Gemini pode chamar e executores que traduzem essas chamadas em requests HTTP ao backend Java.
 
+## Numero do pedido (`order_ref.py`)
+
+O mesmo identificador do **Pedido #X** no app e do WhatsApp e o `id` do resumo.
+[order_ref.py](order_ref.py) normaliza `order_id` / itens de `order_ids` aceitando
+inteiro ou strings como `#42`, `pedido 42`, `nº 7`. Usado em `actions` e
+`deep_orders`.
+
 ## Como adicionar uma nova tool
 
 1. Escolha o modulo correto (ou crie um novo para um dominio novo):
@@ -42,6 +49,7 @@ Cada modulo neste diretorio define Function Declarations que o Gemini pode chama
 - Status 204 do backend → retornar `{"data": [], "message": "Nenhum dado encontrado"}`
 - Erros sao capturados pelo registry — nao precisa try/except dentro do executor
 - Token Bearer e repassado ao backend via header Authorization
+- Em tools que recebem **pedido / resumo**, prefira reutilizar `parse_resumo_order_id` / `parse_resumo_order_id_list` de `order_ref.py` para aceitar o mesmo formato que o usuario ve no app (`#42`, `pedido 42`).
 
 ## Padrao Two-Step Confirmation (tools de acao — V2)
 

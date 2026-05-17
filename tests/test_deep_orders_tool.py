@@ -22,6 +22,17 @@ def _client(get_resp):
 
 
 @pytest.mark.asyncio
+async def test_get_order_summary_accepts_string_pedido_format():
+    client = _client(_resp(200, {"id": 5, "valor": 10.0}))
+    with patch("app.tools.registry.get_http_client", return_value=client):
+        result = await execute_tool(
+            "get_order_summary_by_id", {"order_id": "pedido 5"}, "http://x", "tok"
+        )
+    assert result["id"] == 5
+    assert client.get.call_args[0][0].endswith("/resumo-pedido/5")
+
+
+@pytest.mark.asyncio
 async def test_get_cake_order_details_resolves_via_resumo_pedido_bolo_id():
     resumo = _resp(200, {"id": 7, "pedidoBoloId": 88})
     detalhe = _resp(200, {"id": 88, "massa": "Chocolate"})

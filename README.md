@@ -61,6 +61,8 @@ Swagger UI disponivel em http://localhost:8000/docs
 pytest tests/ -v
 ```
 
+Inclui `test_order_ref.py` (formatos de numero de pedido aceitos nas tools) junto com demais modulos em `tests/`.
+
 ## Arquitetura
 
 ```
@@ -82,6 +84,7 @@ app/
 │   └── limiter.py       # Instancia slowapi para rate limiting
 ├── tools/
 │   ├── registry.py      # Registro e dispatch de todas as tools
+│   ├── order_ref.py     # Normaliza Pedido #X / pedido X para id do resumo
 │   ├── dashboard.py     # KPIs e metricas gerais
 │   ├── orders.py        # Pedidos por periodo
 │   ├── products.py      # KPIs de fornada
@@ -103,7 +106,7 @@ app/
 - **Cache de insights** — Insights sao cacheados por 5 minutos para reduzir chamadas ao Gemini
 - **Guardrails** — Protecao contra prompt injection, profanidade e conteudo fora de escopo
 - **Rate limiting** — Limites por endpoint via slowapi (por exemplo 15/min para `/ask`, 10/min para `/insights`)
-- **V2 (Kuroko)** — Tools extras: acoes com confirmacao (`actions`), pedidos aprofundados (`deep_orders`), fornadas e catalogo (`batches`, `catalog`), alertas em `alerts.py` + rota `/alerts`
+- **V2 (Kuroko)** — Tools extras: acoes com confirmacao (`actions`), pedidos aprofundados (`deep_orders`), fornadas e catalogo (`batches`, `catalog`), alertas em `alerts.py` + rota `/alerts`; numero do pedido no app (`Pedido #X`) alinhado ao `order_id` via `order_ref.py`
 
 ## Scripts (opcional)
 

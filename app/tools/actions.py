@@ -19,6 +19,8 @@ from typing import Any
 import google.genai as genai
 import httpx
 
+from app.tools.order_ref import parse_resumo_order_id, parse_resumo_order_id_list
+
 logger = logging.getLogger(__name__)
 
 ACTION_TOOL_NAMES = {
@@ -52,7 +54,10 @@ def _confirmed_param() -> genai.types.Schema:
 def _order_id_param() -> genai.types.Schema:
     return genai.types.Schema(
         type=genai.types.Type.INTEGER,
-        description="ID do resumo de pedido (visivel no Kanban / lista de pedidos).",
+        description=(
+            "Numero do pedido: o mesmo do app (Pedido #X) e do WhatsApp "
+            "(id do resumo de pedido)."
+        ),
     )
 
 
@@ -120,7 +125,10 @@ DECLARATIONS = [
                 "order_ids": genai.types.Schema(
                     type=genai.types.Type.ARRAY,
                     items=genai.types.Schema(type=genai.types.Type.INTEGER),
-                    description="IDs dos resumos de pedido a consolidar na mensagem.",
+                    description=(
+                        "Numeros dos pedidos (ids do resumo), como Pedido #1 e #2 "
+                        "no app — a consolidar na mensagem."
+                    ),
                 ),
             },
             required=["order_ids"],
@@ -151,12 +159,16 @@ async def _execute_status_transition(
     headers: dict,
     client: httpx.AsyncClient,
 ) -> dict:
-    order_id = args.get("order_id")
+    raw_oid = args.get("order_id")
     confirmed = bool(args.get("confirmed", False))
     status_label, endpoint_suffix = _STATUS_TRANSITIONS[name]
 
-    if order_id is None:
+    if raw_oid is None:
         return {"error": "order_id e obrigatorio."}
+    try:
+        order_id = parse_resumo_order_id(raw_oid)
+    except ValueError as exc:
+        return {"error": str(exc)}
 
     if not confirmed:
         preview = await _fetch_order_preview(client, base_url, headers, order_id)
@@ -198,14 +210,11 @@ async def _execute_status_transition(
 async def _generate_whatsapp_message(
     args: dict, base_url: str, headers: dict, client: httpx.AsyncClient
 ) -> dict:
-    raw_ids = args.get("order_ids") or []
+    raw_ids = args.get("order_ids")
     try:
-        ids = [int(x) for x in raw_ids]
-    except (TypeError, ValueError):
-        return {"error": "order_ids deve ser uma lista de inteiros."}
-
-    if not ids:
-        return {"error": "Informe pelo menos um order_id."}
+        ids = parse_resumo_order_id_list(raw_ids)
+    except ValueError as exc:
+        return {"error": str(exc)}
 
     url = f"{base_url}/resumo-pedido/mensagens"
     payload = {"idsResumo": ids}

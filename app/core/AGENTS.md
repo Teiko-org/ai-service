@@ -79,6 +79,7 @@ Modelos disponiveis (ordem de prioridade, definidos em `config.py`):
 - Insights JSON do Gemini as vezes vem envolto em ```json ... ``` — o parser em assistant.py trata
 - `MAX_TOOL_ROUNDS=5` existe pra evitar loop infinito
 - Apos tools, se a resposta vier sem texto, `assistant` pode chamar `_recover_text_after_tools` (custo extra de uma geracao)
+- Referencia a pedido na conversa (`Pedido #42`, `pedido 42`) e normalizada em `app.tools.order_ref` antes das chamadas HTTP em `actions` e `deep_orders`
 - Sessoes sao in-memory — restart do servico perde todas as sessoes (aceitavel para projeto academico)
 - Cache e in-memory — restart do servico limpa o cache (mesma razao acima)
 - Cooldowns do model_manager tambem resetam no restart

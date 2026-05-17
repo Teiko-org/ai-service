@@ -13,6 +13,8 @@ existir; se o resumo nao existir, tenta o detalhe com o proprio numero (fallback
 import google.genai as genai
 import httpx
 
+from app.tools.order_ref import parse_resumo_order_id
+
 _VALID_STATUS = {"PENDENTE", "PAGO", "CONCLUIDO", "CANCELADO"}
 
 
@@ -52,7 +54,10 @@ DECLARATIONS = [
             properties={
                 "order_id": genai.types.Schema(
                     type=genai.types.Type.INTEGER,
-                    description="ID do resumo de pedido.",
+                    description=(
+                        "Numero do pedido como no app (Pedido #42) ou no WhatsApp — "
+                        "e o id do resumo. Pode ser o inteiro 42."
+                    ),
                 ),
             },
             required=["order_id"],
@@ -63,8 +68,8 @@ DECLARATIONS = [
         description=(
             "Retorna os detalhes completos de montagem de um pedido de bolo "
             "(massa, recheio, cobertura, decoracao, formato, tamanho, "
-            "observacoes). O numero que o usuario ve no Kanban e o ID do "
-            "RESUMO de pedido — use esse valor em order_id."
+            "observacoes). O numero visivel (Pedido #X / Kanban / WhatsApp) e o "
+            "id do RESUMO — use em order_id (inteiro X)."
         ),
         parameters=genai.types.Schema(
             type=genai.types.Type.OBJECT,
@@ -72,7 +77,7 @@ DECLARATIONS = [
                 "order_id": genai.types.Schema(
                     type=genai.types.Type.INTEGER,
                     description=(
-                        "ID do resumo de pedido (ex.: numero no Kanban). "
+                        "Numero do pedido (resumo): o mesmo do app Pedido #X. "
                         "A tool resolve para o pedido de bolo interno."
                     ),
                 ),
@@ -84,7 +89,7 @@ DECLARATIONS = [
         name="get_batch_order_details",
         description=(
             "Retorna os detalhes de um pedido de fornada (produto, quantidade, "
-            "fornada associada, etc.). O numero visivel no Kanban e o ID do "
+            "fornada associada, etc.). O numero visivel (Pedido #X) e o id do "
             "RESUMO — use em order_id."
         ),
         parameters=genai.types.Schema(
@@ -93,8 +98,8 @@ DECLARATIONS = [
                 "order_id": genai.types.Schema(
                     type=genai.types.Type.INTEGER,
                     description=(
-                        "ID do resumo de pedido. A tool resolve para o "
-                        "pedido de fornada interno."
+                        "Numero do pedido (resumo), mesmo do app. "
+                        "A tool resolve para o pedido de fornada interno."
                     ),
                 ),
             },
@@ -198,9 +203,13 @@ async def execute(
     headers = {"Authorization": f"Bearer {token}"} if token else {}
 
     if name == "get_order_summary_by_id":
-        order_id = args.get("order_id")
-        if order_id is None:
+        raw_oid = args.get("order_id")
+        if raw_oid is None:
             return {"error": "order_id e obrigatorio."}
+        try:
+            order_id = parse_resumo_order_id(raw_oid)
+        except ValueError as exc:
+            return {"error": str(exc)}
         url = f"{base_url}/resumo-pedido/{order_id}"
         resp = await client.get(url, headers=headers)
         if resp.status_code == 404:
@@ -209,9 +218,13 @@ async def execute(
         return resp.json()
 
     if name == "get_cake_order_details":
-        order_id = args.get("order_id")
-        if order_id is None:
+        raw_oid = args.get("order_id")
+        if raw_oid is None:
             return {"error": "order_id e obrigatorio."}
+        try:
+            order_id = parse_resumo_order_id(raw_oid)
+        except ValueError as exc:
+            return {"error": str(exc)}
 
         resumo_url = f"{base_url}/resumo-pedido/{order_id}"
         resumo_resp = await client.get(resumo_url, headers=headers)
@@ -262,9 +275,13 @@ async def execute(
         return resp.json()
 
     if name == "get_batch_order_details":
-        order_id = args.get("order_id")
-        if order_id is None:
+        raw_oid = args.get("order_id")
+        if raw_oid is None:
             return {"error": "order_id e obrigatorio."}
+        try:
+            order_id = parse_resumo_order_id(raw_oid)
+        except ValueError as exc:
+            return {"error": str(exc)}
 
         resumo_url = f"{base_url}/resumo-pedido/{order_id}"
         resumo_resp = await client.get(resumo_url, headers=headers)
