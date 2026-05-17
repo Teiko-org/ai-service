@@ -7,6 +7,7 @@ from app.api.deps import sanitize_input, check_prompt_injection, check_content_p
 from app.core.alerts import get_cached_alerts, refresh_alerts_now
 from app.core.assistant import CarambolosAssistant, RateLimitError
 from app.core.cache import cache
+from app.core.request_context import current_history, current_session_id
 from app.core.limiter import limiter
 from app.core.model_manager import model_manager
 from app.core.sessions import session_store
@@ -57,6 +58,11 @@ async def ask_question(body: AskRequest, request: Request):
 
     assistant = CarambolosAssistant(auth_token=token)
 
+    # Publish per-request context so write tools (V3) can bind the preview
+    # token to this session and enforce same-turn confirmation.
+    history_with_current = [*history, {"role": "user", "content": question}]
+    session_token = current_session_id.set(session.id)
+    history_token = current_history.set(history_with_current)
     try:
         result = await assistant.ask(question, history=history)
     except RateLimitError as exc:
@@ -65,6 +71,9 @@ async def ask_question(body: AskRequest, request: Request):
     except Exception as exc:
         logger.error("Erro no assistente: %s", exc)
         raise HTTPException(status_code=500, detail="Erro ao processar a pergunta.")
+    finally:
+        current_history.reset(history_token)
+        current_session_id.reset(session_token)
 
     session_store.append(session.id, "user", question)
     session_store.append(session.id, "assistant", result["answer"])

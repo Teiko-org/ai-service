@@ -61,6 +61,7 @@ def issue(
     args: dict,
     session_id: str | None,
     ttl_seconds: int | None = None,
+    user_msgs_at_issue: int | None = None,
 ) -> PreviewToken:
     if not settings.confirm_token_secret:
         raise ConfirmTokenError(
@@ -73,6 +74,12 @@ def issue(
     body = f"{int(expires)}.".encode("utf-8") + canon
     digest = _hmac_hex(body)
     token = f"{int(expires)}.{digest}"
+    if user_msgs_at_issue is not None:
+        # Server-side stash so the commit can enforce "new user turn between
+        # preview and commit" without trusting the model to echo a counter.
+        _issued_metadata_store.put(
+            token, expires_at=expires, user_msgs_at_issue=user_msgs_at_issue
+        )
     return PreviewToken(token=token, issued_at=issued, expires_at=expires)
 
 
@@ -103,6 +110,42 @@ class _ConsumedTokensStore:
 _consumed_store = _ConsumedTokensStore()
 
 
+@dataclass
+class _IssuedMeta:
+    expires_at: float
+    user_msgs_at_issue: int
+
+
+class _IssuedMetadataStore:
+    # Maps preview-token -> metadata captured at issue time. Used so the
+    # commit step can validate properties of the preview moment (e.g.
+    # user message count) without relying on the model to echo them back.
+    def __init__(self) -> None:
+        self._data: dict[str, _IssuedMeta] = {}
+        self._lock = threading.Lock()
+
+    def put(self, token: str, expires_at: float, user_msgs_at_issue: int) -> None:
+        with self._lock:
+            self._evict_expired()
+            self._data[token] = _IssuedMeta(
+                expires_at=expires_at, user_msgs_at_issue=user_msgs_at_issue
+            )
+
+    def take(self, token: str) -> _IssuedMeta | None:
+        with self._lock:
+            self._evict_expired()
+            return self._data.pop(token, None)
+
+    def _evict_expired(self) -> None:
+        now = time.time()
+        expired = [t for t, meta in self._data.items() if meta.expires_at < now]
+        for t in expired:
+            del self._data[t]
+
+
+_issued_metadata_store = _IssuedMetadataStore()
+
+
 def _parse_token(token: str) -> tuple[int, str]:
     try:
         exp_str, digest = token.split(".", 1)
@@ -116,6 +159,7 @@ def verify_and_consume(
     tool_name: str,
     args: dict,
     session_id: str | None,
+    current_history: list[dict] | None = None,
 ) -> None:
     if not token:
         raise ConfirmTokenError(
@@ -143,6 +187,13 @@ def verify_and_consume(
         raise ConfirmTokenError(
             "Essa confirmacao ja foi processada. Nao vou repetir a acao."
         )
+
+    # Same-turn defense (V15): only enforced when the issuer stashed the
+    # counter and the caller passed the current history. Skipped silently
+    # otherwise to keep the helper usable in tools that don't need it.
+    meta = _issued_metadata_store.take(token)
+    if meta is not None and current_history is not None:
+        ensure_user_turn_between(meta.user_msgs_at_issue, current_history)
 
     _consumed_store.mark_consumed(token, expires_at)
 

@@ -1,6 +1,7 @@
 import logging
 import re
 
+from app.config import settings
 from app.core.http_client import get_http_client
 from app.tools import (
     actions,
@@ -39,6 +40,17 @@ _EXECUTORS = {
     **{d.name: batches.execute for d in batches.DECLARATIONS},
     **{d.name: catalog.execute for d in catalog.DECLARATIONS},
 }
+
+# Phase-1 V3 writes (creation tools) are gated behind ENABLE_WRITE_TOOLS so
+# the model can't even see them in read-only deployments. Startup in
+# config.py already enforces CONFIRM_TOKEN_SECRET when this is on.
+if settings.enable_write_tools:
+    from app.tools.writes import fornada as writes_fornada
+
+    TOOL_DECLARATIONS = TOOL_DECLARATIONS + writes_fornada.DECLARATIONS
+    _EXECUTORS.update(
+        {d.name: writes_fornada.execute for d in writes_fornada.DECLARATIONS}
+    )
 
 
 # Indirect prompt injection guard: customer-supplied DB fields (observacao,

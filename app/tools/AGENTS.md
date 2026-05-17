@@ -21,6 +21,7 @@ inteiro ou strings como `#42`, `pedido 42`, `nº 7`. Usado em `actions` e
    - `deep_orders.py` — Detalhes e filtros de pedidos via ResumoPedidoController (V2)
    - `batches.py` — Gestao de fornadas (V2)
    - `catalog.py` — Catalogo / cardapio (produtos cadastrados, decoracoes, tamanhos) (V2)
+   - `writes/` — Tools de **escrita** (V3): criam/alteram entidades; uso obriga `ENABLE_WRITE_TOOLS=true` + `CONFIRM_TOKEN_SECRET`. Cada tool segue o fluxo two-step com HMAC preview-token, anti-replay, throttle por sessao, validacao local e auth Bearer obrigatorio. Implementadas hoje: `fornada.py` (`create_batch`, `add_batch_lines`).
 
 2. Adicione a `FunctionDeclaration` na lista `DECLARATIONS`:
    ```python
@@ -141,6 +142,19 @@ O SYSTEM_PROMPT em `app/core/prompts.py` instrui o modelo a SEMPRE seguir esse f
 | get_doughs_catalog         | GET /bolos/massa                | —      |
 | get_fillings_catalog       | GET /bolos/recheio-unitario     | —      |
 
+### writes/fornada.py (V3 — escrita, two-step com HMAC)
+Disponivel apenas quando `ENABLE_WRITE_TOOLS=true`. Cada commit valida HMAC do `confirm_token`, anti-replay, mensagem nova do usuario entre preview e commit, throttle por sessao e Bearer obrigatorio.
+
+| Tool             | Endpoint backend             | Params                                    | Confirmacao? |
+|------------------|------------------------------|-------------------------------------------|--------------|
+| create_batch     | POST /fornadas               | data_inicio, data_fim (yyyy-MM-dd)        | sim (HMAC)   |
+| add_batch_lines  | POST /fornadas/da-vez (loop) | fornada_id, lines[{produto_fornada_id,quantidade}] | sim (HMAC)   |
+
+Validacoes locais antes de tocar o backend:
+
+- `create_batch`: datas `yyyy-MM-dd`, `data_inicio >= hoje`, `data_fim >= data_inicio`, `data_fim <= hoje + 365d`.
+- `add_batch_lines`: `fornada_id` int positivo, `lines` 1..50 itens, cada `produto_fornada_id` int positivo, `quantidade` 1..10000.
+
 ## Anti-patterns
 
 - NUNCA usar `httpx.AsyncClient()` direto — o client vem como parametro via registry
@@ -148,3 +162,4 @@ O SYSTEM_PROMPT em `app/core/prompts.py` instrui o modelo a SEMPRE seguir esse f
 - Descricao da FunctionDeclaration deve ser precisa — o Gemini decide qual tool chamar baseado NELA
 - Nomes de tools em snake_case, parametros em snake_case (mapeados pra camelCase do backend dentro do executor)
 - Tools de acao SEMPRE precisam do parametro `confirmed` e do fluxo two-step — nunca executar PATCH/POST direto
+- Tools de escrita V3 (writes/) SEMPRE precisam dos helpers em `writes/_helpers.py` (issue_preview, verify_commit, check_throttle, require_auth) — nunca implementar o fluxo manualmente
