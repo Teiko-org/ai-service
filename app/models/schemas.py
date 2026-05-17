@@ -59,3 +59,19 @@ class SuggestedPromptsResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     version: str
+
+
+class Alert(BaseModel):
+    type: str = Field(..., description="Categoria do alerta: production, delivery, cancellation, batch.")
+    priority: str = Field(..., description="high | medium | low.")
+    title: str
+    message: str
+    metadata: dict = Field(default_factory=dict)
+
+
+class AlertsResponse(BaseModel):
+    generated_at: str | None = Field(
+        default=None,
+        description="Timestamp ISO-8601 (UTC) de quando os alertas foram calculados.",
+    )
+    alerts: list[Alert] = Field(default_factory=list)

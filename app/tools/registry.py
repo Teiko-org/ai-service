@@ -1,7 +1,17 @@
 import logging
 
 from app.core.http_client import get_http_client
-from app.tools import dashboard, orders, products, production, reports
+from app.tools import (
+    actions,
+    batches,
+    catalog,
+    dashboard,
+    deep_orders,
+    orders,
+    products,
+    production,
+    reports,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +21,10 @@ TOOL_DECLARATIONS = (
     + products.DECLARATIONS
     + production.DECLARATIONS
     + reports.DECLARATIONS
+    + actions.DECLARATIONS
+    + deep_orders.DECLARATIONS
+    + batches.DECLARATIONS
+    + catalog.DECLARATIONS
 )
 
 _EXECUTORS = {
@@ -19,6 +33,10 @@ _EXECUTORS = {
     **{d.name: products.execute for d in products.DECLARATIONS},
     **{d.name: production.execute for d in production.DECLARATIONS},
     **{d.name: reports.execute for d in reports.DECLARATIONS},
+    **{d.name: actions.execute for d in actions.DECLARATIONS},
+    **{d.name: deep_orders.execute for d in deep_orders.DECLARATIONS},
+    **{d.name: batches.execute for d in batches.DECLARATIONS},
+    **{d.name: catalog.execute for d in catalog.DECLARATIONS},
 }
 
 

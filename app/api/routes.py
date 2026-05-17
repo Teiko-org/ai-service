@@ -4,12 +4,15 @@ import re
 from fastapi import APIRouter, Request, HTTPException
 
 from app.api.deps import sanitize_input, check_prompt_injection, check_content_policy, validate_auth_token
+from app.core.alerts import get_cached_alerts, refresh_alerts_now
 from app.core.assistant import CarambolosAssistant, RateLimitError
 from app.core.cache import cache
 from app.core.limiter import limiter
 from app.core.model_manager import model_manager
 from app.core.sessions import session_store
 from app.models.schemas import (
+    Alert,
+    AlertsResponse,
     AskRequest,
     AskResponse,
     Attachment,
@@ -131,6 +134,23 @@ async def generate_insights(body: InsightRequest, request: Request):
     return response
 
 
+@router.get("/alerts", response_model=AlertsResponse)
+@limiter.limit("30/minute")
+async def get_alerts(request: Request, refresh: bool = False):
+    token = await validate_auth_token(request)
+
+    cached = None if refresh else get_cached_alerts()
+    if cached is None:
+        try:
+            cached = await refresh_alerts_now(token=token)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Falha ao gerar alertas: %s", exc)
+            raise HTTPException(status_code=500, detail="Erro ao gerar alertas.")
+
+    alerts = [Alert(**a) for a in cached.get("alerts", [])]
+    return AlertsResponse(generated_at=cached.get("generated_at"), alerts=alerts)
+
+
 SUGGESTED_PROMPTS = [
     SuggestedPrompt(
         label="Como estão os cancelamentos?",
@@ -184,6 +204,16 @@ SUGGESTED_PROMPTS = [
         label="Gerar relatório PDF",
         prompt="Gere um relatorio em PDF com os insights de pedidos.",
         icon="file-down",
+    ),
+    SuggestedPrompt(
+        label="Pedidos para amanhã",
+        prompt="Quais pedidos de bolo estao com entrega para amanha? Liste com cliente, status e valor.",
+        icon="calendar-clock",
+    ),
+    SuggestedPrompt(
+        label="Próxima fornada",
+        prompt="Qual a proxima fornada agendada e quais produtos vao ser oferecidos?",
+        icon="flame",
     ),
 ]
 

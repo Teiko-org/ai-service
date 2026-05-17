@@ -295,6 +295,31 @@ async def test_ask_empty_response_fallback_text():
     assert "Nao foi possivel" in result["answer"]
 
 
+@pytest.mark.asyncio
+async def test_ask_recovery_when_final_text_empty_after_tool():
+    first = _make_response([_function_call_part("get_recent_orders")])
+    empty_final = _make_response([_text_part("")])
+    recovered = _make_response(
+        [_text_part("Clientes mais frequentes: Ana (3), Bruno (2).")]
+    )
+
+    with patch("app.core.assistant.get_client") as mock_client_factory, \
+         patch("app.core.assistant.execute_tool", new_callable=AsyncMock) as mock_exec:
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=[first, empty_final, recovered]
+        )
+        mock_client_factory.return_value = mock_client
+        mock_exec.return_value = {"data": [{"nomeCliente": "Ana"}, {"nomeCliente": "Ana"}]}
+
+        a = CarambolosAssistant(auth_token="t")
+        result = await a.ask("Quem sao os clientes que mais pediram?")
+
+    assert "Ana" in result["answer"]
+    assert result["tools_used"] == ["get_recent_orders"]
+    assert mock_client.aio.models.generate_content.await_count == 3
+
+
 # ============================================================
 # generate_insights — parse JSON limpo
 # ============================================================
