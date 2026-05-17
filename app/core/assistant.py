@@ -13,10 +13,27 @@ from app.tools.registry import TOOL_DECLARATIONS, execute_tool
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 5
+# Read-only flows: keep the budget tight to bound Gemini quota usage.
+# Write flows (V3 chains: catalog lookup -> preview -> commit -> wrap-up)
+# legitimately need more rounds, so we promote the cap on demand.
+MAX_TOOL_ROUNDS_READ = 5
+MAX_TOOL_ROUNDS_WRITE = 8
+# Alias kept for backwards compat with existing tests/imports.
+MAX_TOOL_ROUNDS = MAX_TOOL_ROUNDS_READ
+
 MAX_FALLBACK_ATTEMPTS = 3
 
 _RETRY_DELAY_RE = re.compile(r"retryDelay.*?(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
+
+_WRITE_TOOL_PREFIXES = ("create_", "add_", "update_", "delete_")
+
+
+def _is_write_tool(name: str) -> bool:
+    # Local import: avoid circular dependency at module load time.
+    from app.tools import actions
+    if name in actions.ACTION_TOOL_NAMES and name != "generate_whatsapp_message":
+        return True
+    return name.startswith(_WRITE_TOOL_PREFIXES)
 
 
 class RateLimitError(RuntimeError):
@@ -87,7 +104,11 @@ class CarambolosAssistant:
         ) from last_exc
 
     async def _recover_text_after_tools(self, contents: list) -> str:
-        """Se o modelo devolveu tools mas nao texto, uma chamada extra sem tools forca a resposta."""
+        """Force a text answer when the model returned tool calls but no text.
+
+        Recovery must never claim a write executed when the last
+        function_response was actually a preview (requires_confirmation=True).
+        """
         recovery_contents = [
             *contents,
             genai.types.Content(
@@ -98,7 +119,10 @@ class CarambolosAssistant:
                             "Os dados ja estao na conversa acima (resultados das "
                             "funcoes). Escreva AGORA a resposta final em portugues "
                             "para o usuario, com base nesses dados. NAO invoque "
-                            "novas funcoes. NAO use Markdown."
+                            "novas funcoes. NAO use Markdown. Se o ultimo "
+                            "function_response tiver requires_confirmation=true, "
+                            "voce DEVE apresentar a previa e pedir confirmacao — "
+                            "NUNCA afirme que a acao foi executada."
                         )
                     )
                 ],
@@ -110,7 +134,8 @@ class CarambolosAssistant:
                 "obtidos e aparecem como function_response na conversa. "
                 "Produza somente texto final para o usuario. E proibido chamar "
                 "ferramentas. Se houver campo error no JSON, explique de forma "
-                "clara. NAO use Markdown."
+                "clara. Se houver requires_confirmation=true, peca confirmacao "
+                "e NUNCA diga que executou. NAO use Markdown."
             ),
         )
         try:
@@ -132,6 +157,7 @@ class CarambolosAssistant:
 
     async def ask(self, question: str, history: list[dict] | None = None) -> dict:
         tools_used: list[str] = []
+        max_rounds = MAX_TOOL_ROUNDS_READ
 
         config = genai.types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
@@ -148,7 +174,8 @@ class CarambolosAssistant:
 
         response, model = await self._generate_with_fallback(contents, config)
 
-        for _ in range(MAX_TOOL_ROUNDS):
+        round_idx = 0
+        while round_idx < max_rounds:
             if not response.candidates or not response.candidates[0].content.parts:
                 break
 
@@ -167,7 +194,18 @@ class CarambolosAssistant:
                 tool_args = dict(fc.function_call.args) if fc.function_call.args else {}
                 tools_used.append(tool_name)
 
-                logger.info("Chamando tool: %s(%s)", tool_name, tool_args)
+                # Promote the round budget the first time a write tool
+                # shows up in this turn (chains may need 6-8 rounds).
+                if _is_write_tool(tool_name) and max_rounds == MAX_TOOL_ROUNDS_READ:
+                    max_rounds = MAX_TOOL_ROUNDS_WRITE
+
+                # PII guard: log argument keys only, never their values
+                # (args may carry phone, address, observacao, ...).
+                logger.info(
+                    "Chamando tool: %s (args_keys=%s)",
+                    tool_name,
+                    sorted(tool_args.keys()),
+                )
                 result = await execute_tool(
                     tool_name, tool_args, self.backend_url, self.auth_token
                 )
@@ -184,6 +222,7 @@ class CarambolosAssistant:
             )
 
             response, model = await self._generate_with_fallback(contents, config)
+            round_idx += 1
 
         if not response.candidates or not response.candidates[0].content.parts:
             answer = self._fallback_answer(tools_used)

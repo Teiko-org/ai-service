@@ -1,4 +1,5 @@
 import logging
+import re
 
 from app.core.http_client import get_http_client
 from app.tools import (
@@ -40,6 +41,69 @@ _EXECUTORS = {
 }
 
 
+# Indirect prompt injection guard: customer-supplied DB fields (observacao,
+# nomeCliente, ...) flow back to the model through read tools. Treat them as
+# data, never as instructions. Patterns below get neutralized in-place.
+_INSTRUCTION_PATTERNS = re.compile(
+    r"("
+    r"ignore\s+(as\s+|todas\s+|all\s+|previous\s+|anterior(es)?\s+|suas\s+|minhas\s+|essas\s+|the\s+)?(instrucoes|instruções|instructions|regras|rules|prompts?)"
+    r"|esquec[aá]\s+(suas|tuas|as|todas)?\s*(instrucoes|instruções|regras)?"
+    r"|forget\s+(your|all|previous)\s+(instructions|rules|prompts?)"
+    r"|system\s*prompt"
+    r"|atue\s+como"
+    r"|act\s+as"
+    r"|pretend\s+to\s+be"
+    r"|jailbreak"
+    r"|DAN\s+mode"
+    r"|<\s*system\s*>"
+    r"|\[\s*system\s*\]"
+    r")",
+    re.IGNORECASE,
+)
+
+# Conservative allowlist of DB string fields that come from end-user input.
+# Only these get sanitized; trusted fields (status, IDs, ...) pass through.
+_UNTRUSTED_STRING_KEYS = {
+    "observacao",
+    "observation",
+    "observations",
+    "nomeCliente",
+    "nome_cliente",
+    "nomeUsuario",
+    "nome",
+    "telefoneCliente",
+    "telefone",
+    "phone",
+    "endereco",
+    "endereço",
+    "logradouro",
+    "complemento",
+    "descricao",
+    "descrição",
+    "mensagem",
+    "comentario",
+    "comentário",
+}
+
+_MAX_UNTRUSTED_STRING_LEN = 500
+
+
+def _neutralize_instruction(text: str) -> str:
+    return _INSTRUCTION_PATTERNS.sub(lambda m: f"[texto bloqueado: {m.group(0)[:6]}...]", text)
+
+
+def sanitize_for_llm(value, key: str | None = None):
+    """Strip prompt-injection patterns from untrusted DB-sourced strings."""
+    if isinstance(value, dict):
+        return {k: sanitize_for_llm(v, key=k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [sanitize_for_llm(item, key=key) for item in value]
+    if isinstance(value, str) and key and key in _UNTRUSTED_STRING_KEYS:
+        truncated = value[:_MAX_UNTRUSTED_STRING_LEN]
+        return _neutralize_instruction(truncated)
+    return value
+
+
 async def execute_tool(
     name: str, args: dict, base_url: str, token: str | None = None
 ) -> dict:
@@ -51,8 +115,9 @@ async def execute_tool(
     client = get_http_client()
     try:
         result = await executor(name, args, base_url, token, client)
-        logger.info("Tool %s executada com sucesso", name)
-        return result
+        # PII guard: log tool name only, never argument values.
+        logger.info("Tool executada: %s", name)
+        return sanitize_for_llm(result) if isinstance(result, (dict, list)) else result
     except Exception as exc:
         logger.error("Erro ao executar tool %s: %s", name, exc)
         return {"error": f"Falha ao buscar dados: {str(exc)}"}
