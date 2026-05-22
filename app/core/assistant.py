@@ -81,7 +81,8 @@ class CarambolosAssistant:
             except genai.errors.APIError as exc:
                 last_exc = exc
 
-                if exc.code == 429:
+                if exc.code in (429, 503):
+                    # 503 "high demand" is transient; rotate models like quota exhaustion.
                     retry_after = _extract_retry_seconds(exc)
                     fallback = model_manager.mark_rate_limited(model, retry_after)
                 elif exc.code == 404:
@@ -265,6 +266,12 @@ class CarambolosAssistant:
 
         if REPORT_TOOL_NAME in tools_used:
             return "Pronto, gerei o relatorio de insights. Clique no botao abaixo para baixar o PDF."
+        if "get_upcoming_deliveries" in tools_used:
+            return (
+                "Consultei entregas proximas no sistema e nao ha pedidos de bolo "
+                "com entrega para o periodo pedido (lista vazia). "
+                "Se esperava pedidos, confira as datas no cadastro."
+            )
         if "get_recent_orders" in tools_used:
             return (
                 "Os pedidos recentes foram consultados, mas a resposta em texto "

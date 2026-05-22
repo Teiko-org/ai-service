@@ -154,9 +154,22 @@ async def ask_question(body: AskRequest, request: Request):
     except RateLimitError as exc:
         logger.warning("Rate limit Gemini: %s", exc)
         raise HTTPException(status_code=429, detail=str(exc))
+    except RuntimeError as exc:
+        msg = str(exc).lower()
+        if "high demand" in msg or "try again" in msg:
+            logger.warning("Gemini indisponivel (demanda): %s", exc)
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "A IA esta com alta demanda no momento. "
+                    "Aguarde alguns segundos e tente novamente."
+                ),
+            ) from exc
+        logger.error("Erro no assistente: %s", exc)
+        raise HTTPException(status_code=500, detail="Erro ao processar a pergunta.") from exc
     except Exception as exc:
         logger.error("Erro no assistente: %s", exc)
-        raise HTTPException(status_code=500, detail="Erro ao processar a pergunta.")
+        raise HTTPException(status_code=500, detail="Erro ao processar a pergunta.") from exc
     finally:
         current_history.reset(history_token)
         current_session_id.reset(session_token)
