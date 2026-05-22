@@ -10,6 +10,13 @@ Opcional — testa tambem POST /ask (consome quota Gemini):
 
   .\\.venv\\Scripts\\python.exe scripts\\smoke_stack.py --with-ask
 
+Opcional — preview de write tool (sem Gemini, sem commit no Java):
+
+  .\\.venv\\Scripts\\python.exe scripts\\smoke_stack.py --with-writes
+
+  Requer no .env: ENABLE_WRITE_TOOLS=true e CONFIRM_TOKEN_SECRET. So valida
+  preview (confirm_token); nao executa POST de criacao.
+
 Variaveis de ambiente (opcionais; carrega .env na raiz do ai-service):
 
   CARAMBOLOS_API_URL   default http://localhost:8080
@@ -20,10 +27,12 @@ Variaveis de ambiente (opcionais; carrega .env na raiz do ai-service):
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 
 import httpx
@@ -72,7 +81,57 @@ def _headers_bearer() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def run_smoke(backend: str, ai: str, with_ask: bool) -> int:
+def _writes_enabled_in_env() -> bool:
+    return os.environ.get("ENABLE_WRITE_TOOLS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+async def _smoke_write_preview(backend: str, bearer: str | None) -> tuple[bool, str]:
+    """In-process preview of create_batch (no Gemini, no Java POST)."""
+    if not _writes_enabled_in_env():
+        return True, "ignorado (ENABLE_WRITE_TOOLS=false)"
+
+    if not (os.environ.get("CONFIRM_TOKEN_SECRET") or "").strip():
+        return False, "ENABLE_WRITE_TOOLS=true mas CONFIRM_TOKEN_SECRET vazio"
+
+    root = Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+    from app.core.request_context import current_history, current_session_id
+    from app.tools.registry import TOOL_DECLARATIONS, execute_tool
+
+    write_names = {d.name for d in TOOL_DECLARATIONS if d.name.startswith("create_")}
+    expected = {"create_batch", "add_batch_lines", "create_pedido_bolo_full"}
+    if not expected.issubset(write_names):
+        missing = ", ".join(sorted(expected - write_names))
+        return False, f"writes nao registradas no registry: {missing}"
+
+    di = (date.today() + timedelta(days=30)).isoformat()
+    df = (date.today() + timedelta(days=37)).isoformat()
+    history = [{"role": "user", "content": "smoke v3"}]
+    session_token = current_session_id.set("smoke-v3-session")
+    history_token = current_history.set(history)
+    try:
+        result = await execute_tool(
+            "create_batch",
+            {"data_inicio": di, "data_fim": df},
+            backend,
+            bearer,
+        )
+    finally:
+        current_history.reset(history_token)
+        current_session_id.reset(session_token)
+
+    if result.get("requires_confirmation") and result.get("confirm_token"):
+        return True, "preview create_batch OK (token emitido)"
+    return False, json.dumps(result, ensure_ascii=False)[:240]
+
+
+def run_smoke(backend: str, ai: str, with_ask: bool, with_writes: bool) -> int:
     rep = Report()
     h = _headers_bearer()
     timeout = httpx.Timeout(30.0, connect=5.0)
@@ -165,6 +224,14 @@ def run_smoke(backend: str, ai: str, with_ask: bool) -> int:
             except Exception as exc:  # noqa: BLE001
                 rep.add("AI POST /api/v1/ask (Gemini + tools -> backend)", False, str(exc))
 
+        if with_writes:
+            bearer = (os.environ.get("SMOKE_BEARER") or "").strip() or None
+            try:
+                ok, detail = asyncio.run(_smoke_write_preview(backend, bearer))
+                rep.add(f"V3 write preview (in-process): {detail}", ok, "" if ok else detail)
+            except Exception as exc:  # noqa: BLE001
+                rep.add("V3 write preview (in-process)", False, str(exc))
+
     return rep.print_summary()
 
 
@@ -184,6 +251,14 @@ def main() -> None:
         action="store_true",
         help="Inclui POST /ask (usa GEMINI_API_KEY do .env; consome quota).",
     )
+    p.add_argument(
+        "--with-writes",
+        action="store_true",
+        help=(
+            "Preview de create_batch via registry (sem Gemini/commit). "
+            "Requer ENABLE_WRITE_TOOLS=true e CONFIRM_TOKEN_SECRET no .env."
+        ),
+    )
     args = p.parse_args()
 
     print("Smoke stack")
@@ -191,8 +266,9 @@ def main() -> None:
     print(f"  AI:      {args.ai_url}")
     print(f"  Bearer:  {'sim (SMOKE_BEARER)' if _headers_bearer() else 'nao'}")
     print(f"  /ask:    {'sim (--with-ask)' if args.with_ask else 'nao'}")
+    print(f"  writes:  {'sim (--with-writes)' if args.with_writes else 'nao'}")
 
-    code = run_smoke(args.backend_url, args.ai_url, args.with_ask)
+    code = run_smoke(args.backend_url, args.ai_url, args.with_ask, args.with_writes)
     sys.exit(code)
 
 

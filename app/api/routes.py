@@ -4,9 +4,11 @@ import re
 from fastapi import APIRouter, Request, HTTPException
 
 from app.api.deps import sanitize_input, check_prompt_injection, check_content_policy, validate_auth_token
+from app.config import settings
 from app.core.alerts import get_cached_alerts, refresh_alerts_now
 from app.core.assistant import CarambolosAssistant, RateLimitError
 from app.core.cache import cache
+from app.core.request_context import current_history, current_session_id
 from app.core.limiter import limiter
 from app.core.model_manager import model_manager
 from app.core.sessions import session_store
@@ -19,11 +21,20 @@ from app.models.schemas import (
     InsightRequest,
     InsightsResponse,
     Insight,
+    PendingConfirmation,
     SuggestedPrompt,
     SuggestedPromptsResponse,
     HealthResponse,
+    WriteConfirmationCommit,
 )
+from app.tools.registry import execute_tool
 from app.tools.reports import REPORT_TOOL_NAME, REPORT_ENDPOINT, REPORT_FILENAME
+
+# Allowlist of write actions reachable via the direct commit endpoint
+# (G4 + G13). Anything outside this set is rejected before touching tools.
+_VALID_WRITE_ACTIONS = frozenset(
+    {"create_batch", "add_batch_lines", "create_pedido_bolo_full"}
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
@@ -38,6 +49,55 @@ def _user_requested_report(question: str) -> bool:
     return bool(_REPORT_INTENT_RE.search(question or ""))
 
 
+def _format_write_commit_answer(action: str, result: dict) -> str:
+    if result.get("error"):
+        return str(result["error"])
+    if action == "create_batch":
+        return "Fornada criada com sucesso."
+    if action == "add_batch_lines":
+        return "Produtos adicionados a fornada com sucesso."
+    if action == "create_pedido_bolo_full":
+        numero = result.get("pedido_numero")
+        if numero is not None:
+            return f"Pedido #{numero} criado com sucesso."
+        return "Pedido de bolo criado com sucesso."
+    return "Acao concluida com sucesso."
+
+
+async def _handle_write_confirmation(
+    confirmation: WriteConfirmationCommit,
+    session_id: str,
+    history: list[dict],
+    bearer_token: str | None,
+) -> dict:
+    user_line = "Confirmo a acao pendente."
+    history_with = [*history, {"role": "user", "content": user_line}]
+    session_token = current_session_id.set(session_id)
+    history_token = current_history.set(history_with)
+    try:
+        args = {
+            **confirmation.payload,
+            "confirmed": True,
+            "confirm_token": confirmation.confirm_token,
+        }
+        result = await execute_tool(
+            confirmation.action,
+            args,
+            settings.carambolos_api_url,
+            bearer_token,
+        )
+    finally:
+        current_history.reset(history_token)
+        current_session_id.reset(session_token)
+
+    answer = _format_write_commit_answer(confirmation.action, result)
+    return {
+        "answer": answer,
+        "tools_used": [confirmation.action],
+        "pending_confirmation": None,
+    }
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
     return HealthResponse(status="ok", version="1.0.0")
@@ -48,15 +108,47 @@ async def health_check():
 async def ask_question(body: AskRequest, request: Request):
     token = await validate_auth_token(request)
 
+    session = session_store.get_or_create(body.session_id)
+    history = session_store.get_history(session.id, limit=10)
+
+    if body.confirmation is not None:
+        if not settings.enable_write_tools:
+            raise HTTPException(
+                status_code=400,
+                detail="Confirmacao recebida mas escrita esta desabilitada no servidor.",
+            )
+        if body.confirmation.action not in _VALID_WRITE_ACTIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Acao '{body.confirmation.action}' nao e uma acao de "
+                    "escrita reconhecida."
+                ),
+            )
+        result = await _handle_write_confirmation(
+            body.confirmation, session.id, history, token
+        )
+        session_store.append(session.id, "user", "Confirmo.")
+        session_store.append(session.id, "assistant", result["answer"])
+        return AskResponse(
+            answer=result["answer"],
+            tools_used=result["tools_used"],
+            session_id=session.id,
+            attachments=[],
+            pending_confirmation=None,
+        )
+
     question = sanitize_input(body.question)
     check_prompt_injection(question)
     check_content_policy(question)
 
-    session = session_store.get_or_create(body.session_id)
-    history = session_store.get_history(session.id, limit=10)
-
     assistant = CarambolosAssistant(auth_token=token)
 
+    # Publish per-request context so write tools (V3) can bind the preview
+    # token to this session and enforce same-turn confirmation.
+    history_with_current = [*history, {"role": "user", "content": question}]
+    session_token = current_session_id.set(session.id)
+    history_token = current_history.set(history_with_current)
     try:
         result = await assistant.ask(question, history=history)
     except RateLimitError as exc:
@@ -78,6 +170,9 @@ async def ask_question(body: AskRequest, request: Request):
     except Exception as exc:
         logger.error("Erro no assistente: %s", exc)
         raise HTTPException(status_code=500, detail="Erro ao processar a pergunta.") from exc
+    finally:
+        current_history.reset(history_token)
+        current_session_id.reset(session_token)
 
     session_store.append(session.id, "user", question)
     session_store.append(session.id, "assistant", result["answer"])
@@ -102,11 +197,17 @@ async def ask_question(body: AskRequest, request: Request):
             )
         )
 
+    pending = result.get("pending_confirmation")
+    pending_model = (
+        PendingConfirmation(**pending) if isinstance(pending, dict) else None
+    )
+
     return AskResponse(
         answer=result["answer"],
         tools_used=result["tools_used"],
         session_id=session.id,
         attachments=attachments,
+        pending_confirmation=pending_model,
     )
 
 

@@ -356,3 +356,96 @@ def test_suggested_prompts_all_have_required_fields():
         assert p["label"]
         assert p["prompt"]
         assert isinstance(p.get("icon", ""), (str, type(None)))
+
+
+@patch("app.api.routes.CarambolosAssistant")
+def test_ask_returns_pending_confirmation(mock_assistant_cls):
+    mock_instance = AsyncMock()
+    mock_instance.ask.return_value = {
+        "answer": "Vou criar a fornada. Confirma?",
+        "tools_used": ["create_batch"],
+        "pending_confirmation": {
+            "action": "create_batch",
+            "confirm_token": "123.sig",
+            "payload": {"data_inicio": "2026-06-01", "data_fim": "2026-06-07"},
+            "message": "Previa fornada",
+        },
+    }
+    mock_assistant_cls.return_value = mock_instance
+
+    resp = client.post(
+        "/api/v1/ask",
+        json={"question": "crie fornada de 1 a 7 de junho"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["pending_confirmation"]["action"] == "create_batch"
+    assert data["pending_confirmation"]["confirm_token"] == "123.sig"
+
+
+@patch("app.api.routes.execute_tool", new_callable=AsyncMock)
+def test_ask_confirmation_commit_bypasses_gemini(mock_execute, monkeypatch):
+    # Direct-commit endpoint is gated by ENABLE_WRITE_TOOLS; flip it on for
+    # this isolated test without affecting the wider settings.
+    from app.api import routes as routes_mod
+
+    monkeypatch.setattr(routes_mod.settings, "enable_write_tools", True)
+
+    mock_execute.return_value = {
+        "ok": True,
+        "action": "create_batch",
+        "data": {"id": 1},
+    }
+
+    resp = client.post(
+        "/api/v1/ask",
+        json={
+            "question": "Confirmo.",
+            "confirmation": {
+                "action": "create_batch",
+                "confirm_token": "1779457371.d084de4dfe883b6e0be5048c45e37cf5edaa619170e063fc57cb4c7b074e4d01",
+                "payload": {"data_inicio": "2026-06-01", "data_fim": "2026-06-07"},
+            },
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "criada" in data["answer"].lower()
+    assert data["pending_confirmation"] is None
+    mock_execute.assert_awaited_once()
+
+
+@patch("app.api.routes.execute_tool", new_callable=AsyncMock)
+def test_ask_confirmation_unknown_action_rejected(mock_execute, monkeypatch):
+    from app.api import routes as routes_mod
+
+    monkeypatch.setattr(routes_mod.settings, "enable_write_tools", True)
+
+    resp = client.post(
+        "/api/v1/ask",
+        json={
+            "question": "Confirmo.",
+            "confirmation": {
+                "action": "delete_everything",
+                "confirm_token": "1779457371.deadbeef" + "0" * 50,
+                "payload": {},
+            },
+        },
+    )
+    assert resp.status_code == 400
+    mock_execute.assert_not_awaited()
+
+
+def test_ask_confirmation_when_writes_disabled_rejected():
+    resp = client.post(
+        "/api/v1/ask",
+        json={
+            "question": "Confirmo.",
+            "confirmation": {
+                "action": "create_batch",
+                "confirm_token": "1779457371.deadbeef" + "0" * 50,
+                "payload": {},
+            },
+        },
+    )
+    assert resp.status_code == 400

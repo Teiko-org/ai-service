@@ -199,6 +199,20 @@ def _sort_by_priority(alerts: list[Alert]) -> list[Alert]:
     return sorted(alerts, key=lambda a: order.get(a.priority, 99))
 
 
+def _dedupe_and_cap(alerts: list[Alert], max_items: int = 5) -> list[Alert]:
+    seen: set[tuple[str, str]] = set()
+    unique: list[Alert] = []
+    for alert in alerts:
+        key = (alert.type, alert.title)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(alert)
+        if len(unique) >= max_items:
+            break
+    return unique
+
+
 async def compute_alerts(token: str | None = None) -> list[Alert]:
     data = await _gather(token)
     alerts: list[Alert] = []
@@ -213,7 +227,7 @@ async def compute_alerts(token: str | None = None) -> list[Alert]:
     prod = _build_production_alert(data["doughs"], data["fillings"])
     if prod is not None:
         alerts.append(prod)
-    return _sort_by_priority(alerts)
+    return _dedupe_and_cap(_sort_by_priority(alerts))
 
 
 def get_cached_alerts() -> dict | None:

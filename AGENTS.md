@@ -18,7 +18,7 @@ Este servico NAO acessa o banco diretamente. Toda leitura de dados passa pelas t
 
 - `app/api/` — Rotas HTTP e seguranca (deps.py). Sem AGENTS.md proprio, coberto por este node.
 - `app/core/` — Logica do assistente, client Gemini, prompts, sessoes, cache, gerenciador de modelos, rate limiter, http client compartilhado. Ver `app/core/AGENTS.md`.
-- `app/tools/` — Function Declarations do Gemini mapeadas a endpoints do backend. Inclui `order_ref.py` (normaliza numero do pedido #X / pedido X para id do resumo). Ver `app/tools/AGENTS.md`.
+- `app/tools/` — Function Declarations do Gemini mapeadas a endpoints do backend. Inclui `order_ref.py` (normaliza numero do pedido #X / pedido X para id do resumo) e `writes/` (V3 — criacao com two-step HMAC). Ver `app/tools/AGENTS.md`.
 - `app/models/` — Schemas Pydantic (request/response). Arquivo unico, coberto por este node.
 - `tests/` — Testes com pytest. Mocks para Gemini, TestClient do FastAPI.
 
@@ -41,6 +41,9 @@ Tudo via `.env` / variavel de ambiente. Validado por `pydantic-settings` em `app
 - `CARAMBOLOS_API_URL` — URL do backend Java (default: `http://localhost:8080`)
 - `ALLOWED_ORIGINS` — CORS origins separados por virgula
 - `LOG_LEVEL` — DEBUG, INFO, WARNING, ERROR
+- `ENABLE_WRITE_TOOLS` — `true` carrega tools de escrita no registry (default: `false`)
+- `CONFIRM_TOKEN_SECRET` — Obrigatorio se writes ligadas; segredo HMAC do preview-token
+- `CONFIRM_TOKEN_TTL_SECONDS` — TTL do token (default: `120`)
 
 Modelos de fallback definidos em `FALLBACK_MODELS` no `config.py`:
 - `gemini-2.5-flash-lite` (principal — 15 RPM, 1.000 RPD)
@@ -66,9 +69,12 @@ Modelos de fallback definidos em `FALLBACK_MODELS` no `config.py`:
 5. Se resposta contem `function_call(s)` → registry despacha para executor correto
 6. Executor chama endpoint do backend Java via httpx compartilhado (em `actions` e `deep_orders`, `order_id` e normalizado — ex.: `#42` e o mesmo resumo que `42`)
 7. Resultado volta pro Gemini como function_response
-8. Loop ate max 5 rounds ou Gemini responder com texto final
-9. Mensagens (user + assistant) sao salvas na sessao
-10. Response com `answer`, `tools_used` e `session_id`
+8. Loop ate max **5** rounds (leitura) ou **8** quando aparece tool de escrita (`create_*`, `add_*`, PATCH de `actions`)
+9. Se alguma tool retornar `requires_confirmation`, a resposta inclui `pending_confirmation` (action, confirm_token, payload, message)
+10. Mensagens (user + assistant) sao salvas na sessao
+11. Response com `answer`, `tools_used`, `session_id` e opcionalmente `pending_confirmation` / `attachments`
+
+**Commit direto (G13):** o app pode enviar `confirmation` no body do `/ask` (sem Gemini) com o mesmo `confirm_token` e `payload` da previa — ver `WriteConfirmationCommit` em `schemas.py`.
 
 ## Fluxo de insights (/insights)
 
@@ -88,16 +94,32 @@ Modelos de fallback definidos em `FALLBACK_MODELS` no `config.py`:
   - **production (medium)**: massas/recheios pendentes (limiar >= 5 itens)
   - **cancellation (high)**: taxa de cancelamento >= 20% (com volume minimo)
   - **batch (low/medium)**: fornada da vez com >= 80% de aproveitamento
+- Dedupe por `(type, title)` e no maximo **5** alertas por resposta
 - Endpoint `/api/v1/alerts` serve do cache; aceita `?refresh=true` para recalcular sob demanda
 
-## Acoes via Chat (V2 — Agentic AI)
+## Acoes via Chat (V2 — status / WhatsApp)
 
-Tools que mudam estado (mark_order_as_*) seguem o padrao two-step:
-1. Modelo chama com `confirmed=False` → tool retorna previa + `requires_confirmation: True`
-2. Modelo apresenta a previa e aguarda confirmacao explicita do usuario
-3. Modelo chama de novo com `confirmed=True` → tool executa o PATCH/POST
+Tools `mark_order_as_*` e `generate_whatsapp_message` em `actions.py`. PATCH de status segue two-step com `confirmed` (sem HMAC na V2; writes V3 usam `confirm_token`).
 
-Ver `app/tools/AGENTS.md` para detalhes.
+## Escrita via Chat (V3 — criacao de entidades)
+
+Ativas so com `ENABLE_WRITE_TOOLS=true`. Tools em `app/tools/writes/`:
+
+| Tool | Efeito |
+|------|--------|
+| `create_batch` | `POST /fornadas` |
+| `add_batch_lines` | `POST /fornadas/da-vez` (lote) |
+| `create_pedido_bolo_full` | Cadeia recheio → bolo → pedido → resumo (+ endereco se ENTREGA) |
+
+Fluxo two-step (todas as writes):
+
+1. `confirmed=false` (ou omitido) → previa + `confirm_token` HMAC (TTL ~120s, ligado a sessao e payload)
+2. Nova mensagem do usuario (ou botao Confirmar no app)
+3. `confirmed=true` + mesmo `confirm_token` + mesmo payload → commit (idempotente 5 min em retry)
+
+Guardrails: auth obrigatorio no commit, throttle por sessao+tool, validacao local, `sanitize_for_llm` nas leituras, rollback best-effort na cadeia de bolo.
+
+Ver `app/tools/AGENTS.md` (secao `writes/`).
 
 ## Anti-patterns
 
@@ -121,6 +143,12 @@ Inclui checagem de integracao **AI → Java** via `GET /api/v1/alerts?refresh=tr
 .\.venv\Scripts\python.exe scripts\smoke_stack.py --with-ask
 ```
 
+Preview de write V3 (sem Gemini, sem commit no Java; exige `ENABLE_WRITE_TOOLS` + `CONFIRM_TOKEN_SECRET` no `.env`):
+
+```powershell
+.\.venv\Scripts\python.exe scripts\smoke_stack.py --with-writes
+```
+
 Opcional: `SMOKE_BEARER` com JWT se quiser repetir o mesmo header que o app usaria para endpoints protegidos.
 
 ## Testes
@@ -136,3 +164,6 @@ Opcional: `SMOKE_BEARER` com JWT se quiser repetir o mesmo header que o app usar
 - `test_alerts.py` — Feature 4: heuristicas de alertas, cache e endpoint /alerts
 - `test_model_manager.py` — Fallback, cooldown e liberacao quando todos em cooldown
 - `test_order_ref.py` — Parse de numero de pedido (Pedido #X, `pedido 42`, etc.) para id do resumo
+- `test_confirm_tokens.py`, `test_write_throttle.py`, `test_sanitize_for_llm.py`, `test_assistant_hardening.py` — Guardrails V3 fase 0
+- `test_writes_fornada.py`, `test_writes_pedido_bolo.py`, `test_write_idempotency.py` — Writes V3 fases 1–2
+- `test_alerts_dedupe.py` — Dedupe de alertas
