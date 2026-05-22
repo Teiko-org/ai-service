@@ -45,11 +45,11 @@ _EXECUTORS = {
 # the model can't even see them in read-only deployments. Startup in
 # config.py already enforces CONFIRM_TOKEN_SECRET when this is on.
 if settings.enable_write_tools:
-    from app.tools.writes import fornada as writes_fornada
+    from app.tools.writes import router as writes_router
 
-    TOOL_DECLARATIONS = TOOL_DECLARATIONS + writes_fornada.DECLARATIONS
+    TOOL_DECLARATIONS = TOOL_DECLARATIONS + writes_router.DECLARATIONS
     _EXECUTORS.update(
-        {d.name: writes_fornada.execute for d in writes_fornada.DECLARATIONS}
+        {d.name: writes_router.execute for d in writes_router.DECLARATIONS}
     )
 
 

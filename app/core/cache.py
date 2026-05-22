@@ -34,5 +34,9 @@ class SimpleCache:
         with self._lock:
             self._store.pop(key, None)
 
+    def clear(self):
+        with self._lock:
+            self._store.clear()
+
 
 cache = SimpleCache()

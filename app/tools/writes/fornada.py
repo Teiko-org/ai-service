@@ -19,6 +19,7 @@ from app.tools.writes._helpers import (
     post_json,
     preview_response,
     require_auth,
+    run_idempotent_commit,
     verify_commit,
 )
 
@@ -197,17 +198,17 @@ async def _execute_create_batch(
             ),
         )
 
-    require_auth(token)
-    verify_commit("create_batch", canonical_args, args.get("confirm_token", ""))
-    check_throttle("create_batch")
+    confirm_token = args.get("confirm_token", "")
 
-    body = {"dataInicio": data_inicio_str, "dataFim": data_fim_str}
-    data = await post_json(client, f"{base_url}/fornadas", body, token)
-    return {
-        "ok": True,
-        "action": "create_batch",
-        "data": data,
-    }
+    async def _commit() -> dict:
+        require_auth(token)
+        verify_commit("create_batch", canonical_args, confirm_token)
+        check_throttle("create_batch")
+        body = {"dataInicio": data_inicio_str, "dataFim": data_fim_str}
+        data = await post_json(client, f"{base_url}/fornadas", body, token)
+        return {"ok": True, "action": "create_batch", "data": data}
+
+    return await run_idempotent_commit(confirm_token, _commit)
 
 
 async def _execute_add_batch_lines(
@@ -232,25 +233,29 @@ async def _execute_add_batch_lines(
             ),
         )
 
-    require_auth(token)
-    verify_commit("add_batch_lines", canonical_args, args.get("confirm_token", ""))
-    check_throttle("add_batch_lines")
+    confirm_token = args.get("confirm_token", "")
 
-    created: list[dict] = []
-    for line in lines:
-        body = {
-            "fornadaId": fornada_id,
-            "produtoFornadaId": line["produto_fornada_id"],
-            "quantidade": line["quantidade"],
+    async def _commit() -> dict:
+        require_auth(token)
+        verify_commit("add_batch_lines", canonical_args, confirm_token)
+        check_throttle("add_batch_lines")
+        created: list[dict] = []
+        for line in lines:
+            body = {
+                "fornadaId": fornada_id,
+                "produtoFornadaId": line["produto_fornada_id"],
+                "quantidade": line["quantidade"],
+            }
+            data = await post_json(client, f"{base_url}/fornadas/da-vez", body, token)
+            created.append(data)
+        return {
+            "ok": True,
+            "action": "add_batch_lines",
+            "fornada_id": fornada_id,
+            "created": created,
         }
-        data = await post_json(client, f"{base_url}/fornadas/da-vez", body, token)
-        created.append(data)
-    return {
-        "ok": True,
-        "action": "add_batch_lines",
-        "fornada_id": fornada_id,
-        "created": created,
-    }
+
+    return await run_idempotent_commit(confirm_token, _commit)
 
 
 async def execute(

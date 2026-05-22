@@ -136,6 +136,15 @@ class _IssuedMetadataStore:
             self._evict_expired()
             return self._data.pop(token, None)
 
+    def peek(self, token: str) -> _IssuedMeta | None:
+        with self._lock:
+            self._evict_expired()
+            return self._data.get(token)
+
+    def discard(self, token: str) -> None:
+        with self._lock:
+            self._data.pop(token, None)
+
     def _evict_expired(self) -> None:
         now = time.time()
         expired = [t for t, meta in self._data.items() if meta.expires_at < now]
@@ -191,9 +200,12 @@ def verify_and_consume(
     # Same-turn defense (V15): only enforced when the issuer stashed the
     # counter and the caller passed the current history. Skipped silently
     # otherwise to keep the helper usable in tools that don't need it.
-    meta = _issued_metadata_store.take(token)
+    # Peek first; only discard after the check passes so a rejected commit
+    # cannot bypass the user-turn enforcement on a subsequent retry.
+    meta = _issued_metadata_store.peek(token)
     if meta is not None and current_history is not None:
         ensure_user_turn_between(meta.user_msgs_at_issue, current_history)
+    _issued_metadata_store.discard(token)
 
     _consumed_store.mark_consumed(token, expires_at)
 

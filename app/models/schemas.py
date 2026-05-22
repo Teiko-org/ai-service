@@ -6,12 +6,31 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class WriteConfirmationCommit(BaseModel):
+    """Direct commit for a pending write preview (G13 — app Confirm button)."""
+
+    action: str = Field(..., min_length=1, max_length=80)
+    confirm_token: str = Field(..., min_length=10, max_length=256)
+    payload: dict = Field(default_factory=dict)
+
+
+class PendingConfirmation(BaseModel):
+    action: str
+    confirm_token: str
+    payload: dict = Field(default_factory=dict)
+    message: str = ""
+
+
 class AskRequest(BaseModel):
     question: str = Field(
         ..., min_length=1, max_length=1000,
         description="Pergunta em linguagem natural sobre o negocio"
     )
     session_id: str | None = None
+    confirmation: WriteConfirmationCommit | None = Field(
+        default=None,
+        description="Quando preenchido, executa o commit da acao pendente sem Gemini.",
+    )
 
 
 class Attachment(BaseModel):
@@ -26,6 +45,7 @@ class AskResponse(BaseModel):
     tools_used: list[str]
     session_id: str
     attachments: list[Attachment] = Field(default_factory=list)
+    pending_confirmation: PendingConfirmation | None = None
 
 
 class InsightRequest(BaseModel):

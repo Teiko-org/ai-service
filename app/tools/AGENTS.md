@@ -21,7 +21,7 @@ inteiro ou strings como `#42`, `pedido 42`, `nº 7`. Usado em `actions` e
    - `deep_orders.py` — Detalhes e filtros de pedidos via ResumoPedidoController (V2)
    - `batches.py` — Gestao de fornadas (V2)
    - `catalog.py` — Catalogo / cardapio (produtos cadastrados, decoracoes, tamanhos) (V2)
-   - `writes/` — Tools de **escrita** (V3): criam/alteram entidades; uso obriga `ENABLE_WRITE_TOOLS=true` + `CONFIRM_TOKEN_SECRET`. Cada tool segue o fluxo two-step com HMAC preview-token, anti-replay, throttle por sessao, validacao local e auth Bearer obrigatorio. Implementadas hoje: `fornada.py` (`create_batch`, `add_batch_lines`).
+   - `writes/` — Tools de **escrita** (V3): criam/alteram entidades; uso obriga `ENABLE_WRITE_TOOLS=true` + `CONFIRM_TOKEN_SECRET`. Cada tool segue o fluxo two-step com HMAC preview-token, anti-replay, throttle por sessao, validacao local e auth Bearer obrigatorio. Modulos: `fornada.py` (`create_batch`, `add_batch_lines`), `pedido_bolo.py` (`create_pedido_bolo_full`), roteadas por `router.py`.
 
 2. Adicione a `FunctionDeclaration` na lista `DECLARATIONS`:
    ```python
@@ -154,6 +154,16 @@ Validacoes locais antes de tocar o backend:
 
 - `create_batch`: datas `yyyy-MM-dd`, `data_inicio >= hoje`, `data_fim >= data_inicio`, `data_fim <= hoje + 365d`.
 - `add_batch_lines`: `fornada_id` int positivo, `lines` 1..50 itens, cada `produto_fornada_id` int positivo, `quantidade` 1..10000.
+
+### writes/pedido_bolo.py (V3 — cadeia unica, rollback best-effort)
+
+| Tool                     | Cadeia backend (commit unico)                                                                 | Confirmacao? |
+|--------------------------|-----------------------------------------------------------------------------------------------|--------------|
+| create_pedido_bolo_full  | POST recheio-pedido → POST bolo → POST pedido → POST resumo-pedido (+ POST enderecos se ENTREGA com `endereco`) | sim (HMAC)   |
+
+Em falha apos passo parcial, o executor tenta DELETE reverso (resumo → pedido → bolo → recheio-pedido → endereco criado). Nao e transacao atomica — preferir endpoint agregador no Java se quota/robustez forem criticas.
+
+Validacoes locais: enums `formato`/`tamanho`/`tipo_entrega`, recheio exclusivo XOR unitarios, ENTREGA exige endereco, RETIRADA exige `horario_retirada`, datas `yyyy-MM-dd`, `cobertura_id` opcional (busca primeira cobertura ou cria padrao no commit).
 
 ## Anti-patterns
 

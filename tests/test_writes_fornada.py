@@ -5,6 +5,7 @@ import pytest
 
 from app.config import settings
 from app.core import confirm_tokens, write_throttle
+from app.core.cache import cache
 from app.core.request_context import current_history, current_session_id
 from app.tools.writes import fornada as fornada_tool
 
@@ -21,10 +22,12 @@ def _set_secret(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _reset_stores():
+    cache.clear()
     confirm_tokens._consumed_store = confirm_tokens._ConsumedTokensStore()
     confirm_tokens._issued_metadata_store = confirm_tokens._IssuedMetadataStore()
     write_throttle.write_throttle = write_throttle.WriteThrottle()
     yield
+    cache.clear()
 
 
 @pytest.fixture
@@ -191,7 +194,7 @@ async def test_create_batch_commit_same_turn_refused(request_ctx):
 
 
 @pytest.mark.asyncio
-async def test_create_batch_replay_after_commit_refused(request_ctx):
+async def test_create_batch_replay_returns_idempotent_ok(request_ctx):
     di, df = _future_dates()
     client = _http_client_returning(201, {"id": 7})
     preview = await fornada_tool.execute(
@@ -204,15 +207,16 @@ async def test_create_batch_replay_after_commit_refused(request_ctx):
         "confirmed": True,
         "confirm_token": preview["confirm_token"],
     }
-    await fornada_tool.execute("create_batch", args, "http://x", "tok", client)
+    first = await fornada_tool.execute("create_batch", args, "http://x", "tok", client)
 
     request_ctx.append({"role": "user", "content": "manda de novo"})
-    result = await fornada_tool.execute(
+    second = await fornada_tool.execute(
         "create_batch", args, "http://x", "tok", client
     )
 
-    assert "error" in result
-    assert "ja foi processada" in result["error"].lower() or "processada" in result["error"].lower()
+    assert first["ok"] is True
+    assert second == first
+    assert client.post.await_count == 1
 
 
 @pytest.mark.asyncio

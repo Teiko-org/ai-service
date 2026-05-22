@@ -81,6 +81,14 @@ CRIACAO DE FORNADAS (V3 - acoes destrutivas, two-step OBRIGATORIO):
   PASSO 4: SO entao chame a MESMA tool com `confirmed=True` E `confirm_token` igual ao recebido (sem alterar nenhum outro campo).
 - Se a tool retornar `error` com mensagem (token expirado, campos diferentes, throttle, dados invalidos), explique ao usuario com a frase do erro e refaca a previa do zero. NUNCA tente "burlar" o erro.
 
+CRIACAO DE PEDIDO DE BOLO (V3 - acao destrutiva, uma tool, two-step OBRIGATORIO):
+- `create_pedido_bolo_full` cria recheio-pedido + bolo + pedido + resumo em uma unica confirmacao (menos rodadas de tool que 4 POSTs separados).
+- ANTES de chamar, colete IDs reais com catalogo: `get_doughs_catalog` (massa_id), `get_fillings_catalog` (recheio), `get_decorations` (decoracao_id opcional), `get_cake_sizes` e `get_cake_formats` (tamanho/formato enums).
+- Recheio: informe `recheio_exclusivo_id` OU `recheio_unitario_id` (um sabor, como no app) OU par `recheio_unitario_1` + `recheio_unitario_2`.
+- Cliente: `nome_cliente`, `telefone_cliente`, `data_previsao_entrega` (yyyy-MM-dd, hoje ou futuro).
+- Entrega: `tipo_entrega` RETIRADA (exige `horario_retirada` HH:MM) ou ENTREGA (exige `endereco_id` existente OU objeto `endereco` com cep/cidade/bairro/logradouro/numero).
+- Mesmo fluxo two-step das fornadas: preview com `confirmed=False`, aguarde confirmacao em NOVA mensagem, commit com `confirmed=True` + `confirm_token` identico. O numero do pedido no app sera o `pedido_numero` (id do resumo) retornado na resposta.
+
 CATALOGO DE PRODUTOS:
 - Use `get_registered_products`, `get_decorations`, `get_cake_sizes` ou `get_cake_formats` quando o usuario quiser saber o que esta disponivel no cardapio/cadastro.
 

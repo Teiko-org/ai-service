@@ -157,6 +157,7 @@ class CarambolosAssistant:
 
     async def ask(self, question: str, history: list[dict] | None = None) -> dict:
         tools_used: list[str] = []
+        pending_confirmation: dict | None = None
         max_rounds = MAX_TOOL_ROUNDS_READ
 
         config = genai.types.GenerateContentConfig(
@@ -209,6 +210,13 @@ class CarambolosAssistant:
                 result = await execute_tool(
                     tool_name, tool_args, self.backend_url, self.auth_token
                 )
+                if isinstance(result, dict) and result.get("requires_confirmation"):
+                    pending_confirmation = {
+                        "action": result.get("action") or tool_name,
+                        "confirm_token": result.get("confirm_token", ""),
+                        "payload": result.get("payload") or {},
+                        "message": result.get("message") or "",
+                    }
 
                 function_responses.append(
                     genai.types.Part.from_function_response(
@@ -226,7 +234,11 @@ class CarambolosAssistant:
 
         if not response.candidates or not response.candidates[0].content.parts:
             answer = self._fallback_answer(tools_used)
-            return {"answer": answer, "tools_used": tools_used}
+            return {
+                "answer": answer,
+                "tools_used": tools_used,
+                "pending_confirmation": pending_confirmation,
+            }
 
         text_parts = [
             part.text
@@ -241,7 +253,11 @@ class CarambolosAssistant:
         if not answer:
             answer = self._fallback_answer(tools_used)
 
-        return {"answer": answer, "tools_used": tools_used}
+        return {
+            "answer": answer,
+            "tools_used": tools_used,
+            "pending_confirmation": pending_confirmation,
+        }
 
     @staticmethod
     def _fallback_answer(tools_used: list[str]) -> str:

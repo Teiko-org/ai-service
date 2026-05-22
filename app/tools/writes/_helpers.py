@@ -23,9 +23,12 @@ from typing import Any
 import httpx
 
 from app.core import confirm_tokens, write_throttle as wt_module
+from app.core.cache import cache
 from app.core.confirm_tokens import ConfirmTokenError
 from app.core.request_context import current_history, current_session_id
 from app.core.write_throttle import WriteThrottleError
+
+_IDEMPOTENCY_TTL_SECONDS = 300
 
 
 class WriteToolError(Exception):
@@ -69,6 +72,30 @@ def verify_commit(tool_name: str, args: dict, confirm_token: str) -> None:
         raise WriteToolError(str(exc)) from exc
 
 
+def get_idempotent_result(confirm_token: str) -> dict | None:
+    # G2: network retry with the same token after a successful commit returns
+    # the cached outcome instead of duplicating the write.
+    if not confirm_token:
+        return None
+    cached = cache.get(f"write_commit:{confirm_token}")
+    return cached if isinstance(cached, dict) else None
+
+
+def store_idempotent_result(confirm_token: str, result: dict) -> None:
+    if confirm_token and isinstance(result, dict) and result.get("ok"):
+        cache.set(f"write_commit:{confirm_token}", result, ttl=_IDEMPOTENCY_TTL_SECONDS)
+
+
+async def run_idempotent_commit(confirm_token: str, commit_coro):
+    """Run commit coroutine once; cache successful ok=True responses."""
+    cached = get_idempotent_result(confirm_token)
+    if cached is not None:
+        return cached
+    result = await commit_coro()
+    store_idempotent_result(confirm_token, result)
+    return result
+
+
 def check_throttle(tool_name: str) -> None:
     session_id = current_session_id.get()
     try:
@@ -95,14 +122,37 @@ def preview_response(
     }
 
 
+def _auth_headers(bearer_token: str | None) -> dict[str, str]:
+    return {"Authorization": f"Bearer {bearer_token}"} if bearer_token else {}
+
+
+async def get_json(
+    client: httpx.AsyncClient,
+    url: str,
+    bearer_token: str | None,
+) -> dict | list:
+    resp = await client.get(url, headers=_auth_headers(bearer_token))
+    if resp.status_code >= 400:
+        try:
+            body = resp.json()
+        except Exception:  # noqa: BLE001
+            body = resp.text
+        raise WriteToolError(
+            f"Backend recusou a consulta (HTTP {resp.status_code}): {body}"
+        )
+    try:
+        return resp.json()
+    except Exception:  # noqa: BLE001
+        return {"raw": resp.text}
+
+
 async def post_json(
     client: httpx.AsyncClient,
     url: str,
     json_body: dict,
     bearer_token: str | None,
 ) -> dict:
-    headers = {"Authorization": f"Bearer {bearer_token}"} if bearer_token else {}
-    resp = await client.post(url, json=json_body, headers=headers)
+    resp = await client.post(url, json=json_body, headers=_auth_headers(bearer_token))
     if resp.status_code >= 400:
         # Surface backend validation errors verbatim so the model can
         # explain them to the user instead of swallowing the cause.
@@ -117,3 +167,16 @@ async def post_json(
         return resp.json()
     except Exception:  # noqa: BLE001
         return {"raw": resp.text}
+
+
+async def delete_best_effort(
+    client: httpx.AsyncClient,
+    url: str,
+    bearer_token: str | None,
+) -> None:
+    # Rollback after a partial write chain: best-effort DELETEs; failures are
+    # swallowed so the original error still reaches the user/model.
+    try:
+        await client.delete(url, headers=_auth_headers(bearer_token))
+    except Exception:  # noqa: BLE001
+        pass
