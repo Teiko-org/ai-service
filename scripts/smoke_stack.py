@@ -102,13 +102,23 @@ async def _smoke_write_preview(backend: str, bearer: str | None) -> tuple[bool, 
         sys.path.insert(0, str(root))
 
     from app.core.request_context import current_history, current_session_id
+    from app.config import settings
     from app.tools.registry import TOOL_DECLARATIONS, execute_tool
 
-    write_names = {d.name for d in TOOL_DECLARATIONS if d.name.startswith("create_")}
-    expected = {"create_batch", "add_batch_lines", "create_pedido_bolo_full"}
-    if not expected.issubset(write_names):
-        missing = ", ".join(sorted(expected - write_names))
-        return False, f"writes nao registradas no registry: {missing}"
+    if not settings.enable_write_tools:
+        return False, "ENABLE_WRITE_TOOLS no .env mas settings.enable_write_tools=false (reimport?)"
+
+    expected = {
+        "create_batch",
+        "add_batch_lines",
+        "close_batch",
+        "replace_active_batch",
+        "create_pedido_bolo_full",
+    }
+    declared = {d.name for d in TOOL_DECLARATIONS}
+    missing = expected - declared
+    if missing:
+        return False, f"writes nao registradas no registry: {', '.join(sorted(missing))}"
 
     di = (date.today() + timedelta(days=30)).isoformat()
     df = (date.today() + timedelta(days=37)).isoformat()

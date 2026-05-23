@@ -31,13 +31,14 @@ Este servico NAO acessa o banco diretamente. Toda leitura de dados passa pelas t
 | POST   | /api/v1/insights           | 10/min      | Bearer  | Insights proativos (com cache 5min)                |
 | GET    | /api/v1/alerts             | 30/min      | Bearer  | Alertas proativos (cache 30min, refresh em bg)     |
 | GET    | /api/v1/suggested-prompts  | 60/min      | Nao     | Prompts pre-definidos (pills)                      |
-| GET    | /api/v1/models-status      | 60/min      | Nao     | Cooldown de modelos e API keys (`models`, `api_keys`) |
+| GET    | /api/v1/models-status      | 60/min      | Nao     | `model_chain`, cooldown (`models`, `api_keys`) |
 
 ## Configuracao
 
 Tudo via `.env` / variavel de ambiente. Validado por `pydantic-settings` em `app/config.py`:
 - `GEMINI_API_KEY` ou `GEMINI_API_KEYS` (virgula, ex. 3 chaves) — Google AI Studio; rotacao em 429/503
 - `GEMINI_MODEL` — Modelo Gemini principal (default: `gemini-2.5-flash-lite`)
+- `GEMINI_FALLBACK_MODELS` — Lista opcional (virgula) de modelos apos o principal; padrao em `app/core/model_catalog.py`
 - `CARAMBOLOS_API_URL` — URL do backend Java (default: `http://localhost:8080`)
 - `ALLOWED_ORIGINS` — CORS origins separados por virgula
 - `LOG_LEVEL` — DEBUG, INFO, WARNING, ERROR
@@ -47,10 +48,10 @@ Tudo via `.env` / variavel de ambiente. Validado por `pydantic-settings` em `app
 - `ALLOW_ANONYMOUS_WRITES` — `true` so em dev local (app sem JWT); em `ENVIRONMENT=production` o startup falha
 - `ENVIRONMENT` — `development` | `staging` | `production` (controla o guard acima)
 
-Modelos de fallback definidos em `FALLBACK_MODELS` no `config.py`:
-- `gemini-2.5-flash-lite` (principal — 15 RPM, 1.000 RPD)
-- `gemini-2.5-flash` (fallback — 10 RPM, 250 RPD)
-- `gemini-2.5-pro` (ultimo recurso — 5 RPM, 100 RPD)
+Cadeia padrao (`DEFAULT_GEMINI_FALLBACK_MODELS` em `app/core/model_catalog.py`, sobrescrita por `GEMINI_FALLBACK_MODELS` no `.env`):
+- `gemini-2.5-flash-lite` → `gemini-2.5-flash` → `gemini-3.1-flash-lite` → `gemini-3.5-flash` → `gemini-2.5-pro`
+
+Ordem efetiva: `GEMINI_MODEL` primeiro, depois os fallbacks sem duplicar. Listar modelos da chave: `scripts/list_gemini_models.py`.
 
 ## Seguranca (Defense in Depth)
 
@@ -172,6 +173,22 @@ Preview de write V3 (sem Gemini, sem commit no Java; exige `ENABLE_WRITE_TOOLS` 
 
 Opcional: `SMOKE_BEARER` com JWT se quiser repetir o mesmo header que o app usaria para endpoints protegidos.
 
+## Roteiro automatizado (regressao do assistente)
+
+`scripts/run_roteiro.py` executa `scripts/ROTEIRO_KUROKO_ASSISTANTE.md` contra `POST /api/v1/ask` (leituras, escrita V2/V3, demo fornada). Usa as mesmas rotas de fallback de modelo/chave que o app.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_roteiro.py --read-only --delay 20
+.\.venv\Scripts\python.exe scripts\run_roteiro.py --with-writes --auto-confirm --from 20 --resume --delay 20
+```
+
+- `--dynamic-ids` (padrao): probes de listagem antes do run; substitui IDs/datas de exemplo.
+- `--auto-confirm`: confirma previas de escrita (token ou `Confirmo.` na sessao).
+- `--resume` / `--merge-from`: une passos em um unico `roteiro_run_*.json`; checkpoint em `reports/roteiro_checkpoint.json` a cada passo.
+- Heuristicas em `run_roteiro.py` marcam FAIL se escrita ficar so na previa sem tool de sucesso.
+
+Relatorios em `reports/` (gitignored). Roteiro completo: `scripts/ROTEIRO_KUROKO_ASSISTANTE.md` secao 9.
+
 ## Testes
 
 `pytest` com mocks. Rodar: `.venv/Scripts/python.exe -m pytest tests/ -v`
@@ -188,3 +205,4 @@ Opcional: `SMOKE_BEARER` com JWT se quiser repetir o mesmo header que o app usar
 - `test_confirm_tokens.py`, `test_write_throttle.py`, `test_sanitize_for_llm.py`, `test_assistant_hardening.py` — Guardrails V3 fase 0
 - `test_writes_fornada.py`, `test_writes_pedido_bolo.py`, `test_write_idempotency.py` — Writes V3 fases 1–2
 - `test_alerts_dedupe.py` — Dedupe de alertas
+- `test_run_roteiro_evaluate.py`, `test_run_roteiro_merge.py`, `test_roteiro_parser.py`, `test_roteiro_resolve.py` — Runner do roteiro e IDs dinamicos

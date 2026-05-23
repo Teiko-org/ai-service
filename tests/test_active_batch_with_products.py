@@ -20,8 +20,20 @@ async def test_get_active_batch_with_products():
     prod_resp.status_code = 200
     prod_resp.json = MagicMock(
         return_value=[
-            {"produto": "Pao Frances", "quantidade": 5, "valor": 5.0},
-            {"produto": "Croissant", "quantidade": 3, "valor": 12.0},
+            {
+                "produto": "Pao Frances",
+                "categoria": "Padaria",
+                "quantidade": 5,
+                "valor": 5.0,
+            },
+            {"produto": "Croissant", "categoria": "Salgados", "quantidade": 3, "valor": 12.0},
+            {
+                "produto": "Pao Frances",
+                "categoria": "Padaria",
+                "quantidade": 1,
+                "valor": 5.0,
+            },
+            {"produto": "Croissant", "categoria": "Salgados", "quantidade": 3, "valor": 12.0},
         ]
     )
     prod_resp.raise_for_status = MagicMock()
@@ -35,4 +47,6 @@ async def test_get_active_batch_with_products():
 
     assert result["fornada_ativa"]["id"] == 14
     assert len(result["produtos"]) == 2
-    assert result["produtos"][0]["quantidade"] == 5
+    by_name = {p["produto"]: p["quantidade"] for p in result["produtos"]}
+    assert by_name["Pao Frances"] == 6
+    assert by_name["Croissant"] == 6

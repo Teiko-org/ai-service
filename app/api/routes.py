@@ -9,6 +9,7 @@ from app.core.alerts import get_cached_alerts, refresh_alerts_now
 from app.core.assistant import CarambolosAssistant, RateLimitError
 from app.core.cache import cache
 from app.core.confirmation_ux import humanize_confirm_error
+from app.core.fornada_summary import append_fornada_summary_if_applicable
 from app.core.request_context import (
     current_history,
     current_session_id,
@@ -33,6 +34,7 @@ from app.models.schemas import (
     HealthResponse,
     WriteConfirmationCommit,
 )
+from app.tools.order_ref import extract_order_ids_from_text
 from app.tools.registry import execute_tool
 from app.tools.reports import REPORT_TOOL_NAME, REPORT_ENDPOINT, REPORT_FILENAME
 
@@ -64,6 +66,11 @@ _CONFIRM_PHRASE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_BATCH_DATE_RANGE_RE = re.compile(
+    r"(\d{1,2}/\d{1,2}/\d{4})\s*(?:a|ate|até|-|–)\s*(\d{1,2}/\d{1,2}/\d{4})",
+    re.IGNORECASE,
+)
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
 
@@ -72,13 +79,207 @@ _REPORT_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_WHATSAPP_INTENT_RE = re.compile(
+    r"\b(whatsapp|zap|mensagem\s+de\s+confirm)",
+    re.IGNORECASE,
+)
+
 
 def _user_requested_report(question: str) -> bool:
     return bool(_REPORT_INTENT_RE.search(question or ""))
 
 
+def _user_requested_whatsapp(question: str) -> bool:
+    return bool(_WHATSAPP_INTENT_RE.search(question or ""))
+
+
+async def _apply_whatsapp_answer_fallback(
+    question: str, token: str | None, result: dict
+) -> None:
+    """Garante texto real da API quando o usuario pediu mensagem de WhatsApp."""
+    if not _user_requested_whatsapp(question):
+        return
+    if "generate_whatsapp_message" in result.get("tools_used", []):
+        return
+    ids = extract_order_ids_from_text(question)
+    if not ids:
+        return
+    wa = await execute_tool(
+        "generate_whatsapp_message",
+        {"order_ids": ids},
+        settings.carambolos_api_url,
+        token,
+    )
+    if not isinstance(wa, dict):
+        return
+    if wa.get("error"):
+        result["answer"] = str(wa["error"])
+    elif wa.get("message_text"):
+        result["answer"] = str(wa["message_text"]).strip()
+    else:
+        return
+    tools = list(result.get("tools_used") or [])
+    if "generate_whatsapp_message" not in tools:
+        tools.append("generate_whatsapp_message")
+    result["tools_used"] = tools
+
+
 def _is_confirmation_phrase(question: str) -> bool:
     return bool(_CONFIRM_PHRASE_RE.match((question or "").strip()))
+
+
+def _pending_dict_from_tool_result(result: dict) -> dict | None:
+    if not result.get("requires_confirmation"):
+        return None
+    token = (result.get("confirm_token") or "").strip()
+    if not token:
+        return None
+    return {
+        "action": result.get("action") or "",
+        "confirm_token": token,
+        "payload": result.get("payload") or {},
+        "message": (result.get("message") or "").strip(),
+    }
+
+
+def _extract_batch_dates_from_history(history: list[dict]) -> tuple[str, str] | None:
+    from app.tools.writes.dates import parse_user_date
+
+    for msg in reversed(history):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content") or ""
+        match = _BATCH_DATE_RANGE_RE.search(content)
+        if not match:
+            continue
+        try:
+            start = parse_user_date(match.group(1), "data_inicio").isoformat()
+            end = parse_user_date(match.group(2), "data_fim").isoformat()
+            return start, end
+        except Exception:
+            continue
+    return None
+
+
+def _wants_replace_batch(question: str) -> bool:
+    low = (question or "").lower()
+    if "substituir" in low or "trocar" in low:
+        return True
+    return _is_confirmation_phrase(question)
+
+
+def _wants_close_only_batch(question: str) -> bool:
+    low = (question or "").lower()
+    return ("encerrar" in low or "encerre" in low) and "substituir" not in low
+
+
+async def _preview_replace_batch(
+    data_inicio: str, data_fim: str, bearer_token: str | None
+) -> dict | None:
+    result = await execute_tool(
+        "replace_active_batch",
+        {
+            "data_inicio": data_inicio,
+            "data_fim": data_fim,
+            "confirmed": False,
+        },
+        settings.carambolos_api_url,
+        bearer_token,
+    )
+    pending = _pending_dict_from_tool_result(result) if isinstance(result, dict) else None
+    if not pending:
+        return None
+    return {
+        "answer": pending["message"],
+        "tools_used": ["replace_active_batch"],
+        "pending_confirmation": pending,
+        "ok": False,
+    }
+
+
+async def _preview_close_active_batch(bearer_token: str | None) -> dict | None:
+    listed = await execute_tool(
+        "get_active_batches",
+        {},
+        settings.carambolos_api_url,
+        bearer_token,
+    )
+    rows = []
+    if isinstance(listed, dict):
+        rows = listed.get("fornadas") or listed.get("data") or []
+    fid = None
+    if isinstance(rows, list) and rows:
+        first = rows[0]
+        if isinstance(first, dict):
+            fid = first.get("numero") or first.get("id")
+    if not isinstance(fid, int) or fid <= 0:
+        return {
+            "answer": "Nao encontrei fornada aberta para encerrar.",
+            "tools_used": ["get_active_batches"],
+            "pending_confirmation": None,
+            "ok": False,
+        }
+    result = await execute_tool(
+        "close_batch",
+        {"fornada_id": fid, "confirmed": False},
+        settings.carambolos_api_url,
+        bearer_token,
+    )
+    pending = _pending_dict_from_tool_result(result) if isinstance(result, dict) else None
+    if not pending:
+        err = result.get("error") if isinstance(result, dict) else None
+        return {
+            "answer": humanize_confirm_error(str(err or "Nao foi possivel encerrar.")),
+            "tools_used": ["close_batch"],
+            "pending_confirmation": None,
+            "ok": False,
+        }
+    return {
+        "answer": pending["message"],
+        "tools_used": ["close_batch"],
+        "pending_confirmation": pending,
+        "ok": False,
+    }
+
+
+async def _try_batch_conflict_fast_path(
+    question: str,
+    history: list[dict],
+    bearer_token: str | None,
+) -> dict | None:
+    """Quando o usuario responde sim/substituir/encerrar sem botao visivel."""
+    if _wants_close_only_batch(question):
+        return await _preview_close_active_batch(bearer_token)
+    if not _wants_replace_batch(question):
+        return None
+    dates = _extract_batch_dates_from_history(history)
+    if not dates:
+        return None
+    return await _preview_replace_batch(dates[0], dates[1], bearer_token)
+
+
+def _pending_model_from_session(session_id: str) -> PendingConfirmation | None:
+    pending = session_store.get_pending_confirmation(session_id)
+    if not isinstance(pending, dict):
+        return None
+    token = (pending.get("confirm_token") or "").strip()
+    if not token:
+        return None
+    try:
+        return PendingConfirmation(**pending)
+    except Exception:
+        return None
+
+
+async def _finalize_write_commit_answer(
+    action: str, result: dict, bearer_token: str | None
+) -> str:
+    answer = _format_write_commit_answer(action, result)
+    if result.get("ok"):
+        answer = await append_fornada_summary_if_applicable(
+            action, result, answer, settings.carambolos_api_url, bearer_token
+        )
+    return answer
 
 
 def _format_write_commit_answer(action: str, result: dict) -> str:
@@ -184,11 +385,34 @@ async def _handle_write_confirmation(
         if isinstance(numero, int) and numero > 0:
             session_store.set_last_pedido_resumo_id(session_id, numero)
 
-    answer = _format_write_commit_answer(confirmation.action, result)
+    answer = await _finalize_write_commit_answer(
+        confirmation.action, result, bearer_token
+    )
+    pending_replay = None
+    if not result.get("ok"):
+        err_low = str(result.get("error") or answer or "").lower()
+        if (
+            confirmation.action == "create_batch"
+            and "fornada" in err_low
+            and confirmation.payload.get("data_inicio")
+            and confirmation.payload.get("data_fim")
+        ):
+            session_store.set_pending_confirmation(session_id, None)
+            replace = await _preview_replace_batch(
+                str(confirmation.payload["data_inicio"]),
+                str(confirmation.payload["data_fim"]),
+                bearer_token,
+            )
+            if replace:
+                session_store.set_pending_confirmation(
+                    session_id, replace.get("pending_confirmation")
+                )
+                return replace
+        pending_replay = _pending_model_from_session(session_id)
     return {
         "answer": answer,
         "tools_used": [confirmation.action],
-        "pending_confirmation": None,
+        "pending_confirmation": pending_replay,
         "ok": bool(result.get("ok")),
     }
 
@@ -269,13 +493,16 @@ async def _try_commit_stored_pending(
     finally:
         current_history.reset(history_token)
         current_session_id.reset(session_token)
-    answer = _format_write_commit_answer(action, result)
+    answer = await _finalize_write_commit_answer(action, result, bearer_token)
     if result.get("ok"):
         session_store.set_pending_confirmation(session_id, None)
+    pending_replay = None
+    if not result.get("ok"):
+        pending_replay = _pending_model_from_session(session_id)
     return {
         "answer": answer,
         "tools_used": [action],
-        "pending_confirmation": None,
+        "pending_confirmation": pending_replay,
         "ok": bool(result.get("ok")),
     }
 
@@ -318,12 +545,15 @@ async def ask_question(body: AskRequest, request: Request):
             session_store.set_pending_confirmation(session.id, None)
         session_store.append(session.id, "user", "Confirmo.")
         session_store.append(session.id, "assistant", result["answer"])
+        pending_model = result.get("pending_confirmation")
+        if pending_model is None and not result.get("ok"):
+            pending_model = _pending_model_from_session(session.id)
         return AskResponse(
             answer=result["answer"],
             tools_used=result["tools_used"],
             session_id=session.id,
             attachments=[],
-            pending_confirmation=None,
+            pending_confirmation=pending_model,
         )
 
     question = sanitize_input(body.question)
@@ -333,15 +563,31 @@ async def ask_question(body: AskRequest, request: Request):
     fast_commit = await _try_commit_stored_pending(
         question, session.id, history, token
     )
+    if fast_commit is None:
+        fast_commit = await _try_batch_conflict_fast_path(
+            question,
+            [*history, {"role": "user", "content": question}],
+            token,
+        )
     if fast_commit is not None:
         session_store.append(session.id, "user", question)
         session_store.append(session.id, "assistant", fast_commit["answer"])
+        pending_raw = fast_commit.get("pending_confirmation")
+        if isinstance(pending_raw, dict):
+            session_store.set_pending_confirmation(session.id, pending_raw)
+        pending_model = (
+            PendingConfirmation(**pending_raw)
+            if isinstance(pending_raw, dict)
+            else _pending_model_from_session(session.id)
+        )
+        if pending_model is None and not fast_commit.get("ok"):
+            pending_model = _pending_model_from_session(session.id)
         return AskResponse(
             answer=fast_commit["answer"],
             tools_used=fast_commit["tools_used"],
             session_id=session.id,
             attachments=[],
-            pending_confirmation=None,
+            pending_confirmation=pending_model,
         )
 
     assistant = CarambolosAssistant(auth_token=token)
@@ -375,6 +621,8 @@ async def ask_question(body: AskRequest, request: Request):
     finally:
         current_history.reset(history_token)
         current_session_id.reset(session_token)
+
+    await _apply_whatsapp_answer_fallback(question, token, result)
 
     pending = result.get("pending_confirmation")
     if isinstance(pending, dict) and (pending.get("message") or "").strip():
@@ -548,7 +796,10 @@ async def get_suggested_prompts():
 
 @router.get("/models-status")
 async def get_models_status():
+    mm = model_manager.get_status()
     return {
-        "models": model_manager.get_status(),
+        "model_chain": mm["chain"],
+        "model_primary": mm["primary"],
+        "models": mm["models"],
         "api_keys": api_key_manager.get_status(),
     }

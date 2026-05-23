@@ -14,18 +14,20 @@ DECLARATIONS = [
     genai.types.FunctionDeclaration(
         name="get_next_batch",
         description=(
-            "Retorna a proxima fornada agendada (data de inicio futura mais "
-            "proxima). Use quando o usuario perguntar 'qual a proxima fornada', "
-            "'quando vai ter fornada' ou similar."
+            "Retorna a proxima fornada ABERTA no sistema com data de inicio futura. "
+            "Nao significa que o periodo ja esta rolando — pode estar aberta no app "
+            "antes do calendario comecar. Use para 'qual a proxima fornada', "
+            "'quando vai ter fornada'. Na resposta, separe aberta no sistema vs "
+            "periodo (inicio/fim) e se o periodo ja comecou."
         ),
         parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
     ),
     genai.types.FunctionDeclaration(
         name="get_active_batches",
         description=(
-            "Lista todas as fornadas ATIVAS (nao encerradas). Use quando o "
-            "usuario perguntar pelas fornadas em andamento ou pedir 'lista de "
-            "fornadas'."
+            "Lista fornadas abertas no sistema (nao encerradas). NAO confundir "
+            "com 'periodo em curso no calendario'. Use para 'fornadas abertas' "
+            "ou 'lista de fornadas'."
         ),
         parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
     ),
@@ -81,9 +83,10 @@ DECLARATIONS = [
     genai.types.FunctionDeclaration(
         name="get_active_batch_with_products",
         description=(
-            "Fornada ATIVA agora + lista de produtos/quantidades dessa fornada. "
-            "Use SEMPRE que o usuario pedir 'fornada ativa', 'fornada em andamento' "
-            "e seus produtos — uma chamada so. Nao use get_latest_batch_products para isso."
+            "Fornada aberta no app (operacional) + produtos/quantidades. Use quando "
+            "pedirem 'fornada ativa', produtos da fornada atual. Na resposta, diga se "
+            "o periodo ja comecou ou ainda e futuro — nao diga so 'em andamento'. "
+            "Uma chamada so; prefira a get_latest_batch_products."
         ),
         parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
     ),
@@ -99,9 +102,14 @@ DECLARATIONS = [
 ]
 
 
+from app.core.batch_status import (  # noqa: E402
+    active_batch_instruction,
+    build_batch_summary,
+)
 from app.tools.writes.batch_overlap import (  # noqa: E402  (post-DECLARATIONS import)
     pick_active_batch as _pick_primary_active_batch,
 )
+from app.tools.writes.catalog_display import merge_fornada_product_rows
 
 
 def _simplify_product_row(row: dict) -> dict:
@@ -112,6 +120,13 @@ def _simplify_product_row(row: dict) -> dict:
         "valor": row.get("valor"),
         "categoria": row.get("categoria"),
     }
+
+
+def _products_from_api_rows(raw: list) -> list[dict]:
+    simplified = [
+        _simplify_product_row(r) for r in raw if isinstance(r, dict)
+    ]
+    return merge_fornada_product_rows(simplified)
 
 
 async def execute(
@@ -162,7 +177,7 @@ async def execute(
         items = raw if isinstance(raw, list) else []
         return {
             "fornada_id": batch_id,
-            "produtos": [_simplify_product_row(r) for r in items if isinstance(r, dict)],
+            "produtos": _products_from_api_rows(items),
         }
 
     if name == "get_active_batch_with_products":
@@ -188,21 +203,20 @@ async def execute(
         product_list = (
             raw_products if isinstance(raw_products, list) else []
         )
+        summary = build_batch_summary(active)
         return {
             "fornada_ativa": {
                 "id": fid,
-                "data_inicio": str(active.get("dataInicio") or active.get("data_inicio"))[
-                    :10
-                ],
-                "data_fim": str(active.get("dataFim") or active.get("data_fim"))[:10],
+                "numero": summary.get("numero"),
+                "data_inicio": summary.get("data_inicio"),
+                "data_fim": summary.get("data_fim"),
+                "status_sistema": summary.get("status_sistema"),
+                "status_sistema_texto": summary.get("status_sistema_texto"),
+                "periodo_calendario": summary.get("periodo_calendario"),
+                "periodo_calendario_texto": summary.get("periodo_calendario_texto"),
             },
-            "produtos": [
-                _simplify_product_row(r) for r in product_list if isinstance(r, dict)
-            ],
-            "instruction": (
-                "Apresente o periodo da fornada_ativa e a lista produtos com quantidades. "
-                "Ignore campos de data antigos dentro de cada produto — use so fornada_ativa."
-            ),
+            "produtos": _products_from_api_rows(product_list),
+            "instruction": active_batch_instruction(),
         }
 
     if name == "get_latest_batch_products":

@@ -143,8 +143,10 @@ def test_models_status():
     assert resp.status_code == 200
     data = resp.json()
     assert "models" in data
+    assert "model_chain" in data
     assert "api_keys" in data
     assert len(data["models"]) >= 1
+    assert len(data["model_chain"]) >= 1
     for status in (*data["models"].values(), *data["api_keys"].values()):
         assert "available" in status
         assert "cooldown_remaining" in status

@@ -114,6 +114,49 @@ async def test_ask_executes_tool_and_returns_final_answer():
     mock_exec.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_ask_whatsapp_returns_api_text_without_model_wrapper():
+    api_msg = "Ola Maria! Pedido #3019 confirmado."
+    first = _make_response(
+        [
+            _function_call_part(
+                "generate_whatsapp_message", {"order_ids": [3019, 1796]}
+            )
+        ]
+    )
+    second = _make_response(
+        [
+            _text_part(
+                'Ok, segue o texto:\n\n"'
+                + api_msg
+                + '"'
+            )
+        ]
+    )
+
+    with patch("app.core.assistant.get_client") as mock_client_factory, \
+         patch("app.core.assistant.execute_tool", new_callable=AsyncMock) as mock_exec:
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=[first, second]
+        )
+        mock_client_factory.return_value = mock_client
+        mock_exec.return_value = {
+            "ok": True,
+            "message_text": api_msg,
+            "order_ids": [3019, 1796],
+        }
+
+        a = CarambolosAssistant(auth_token="t")
+        result = await a.ask(
+            "Gera mensagem WhatsApp para pedidos #3019 e #1796"
+        )
+
+    assert result["answer"] == api_msg
+    assert "Segue o texto" not in result["answer"]
+    assert result["tools_used"] == ["generate_whatsapp_message"]
+
+
 # ============================================================
 # ask() — protege contra loop infinito de tools
 # ============================================================

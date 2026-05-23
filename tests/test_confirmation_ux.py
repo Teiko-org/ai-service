@@ -7,6 +7,24 @@ def test_humanize_strips_token_jargon():
     assert "sim" in msg.lower() or "confirmar" in msg.lower()
 
 
+def test_humanize_keeps_bolo_catalog_lists():
+    raw = (
+        "Massa 'morango' nao encontrada no cadastro. "
+        "Massas disponiveis: Baunilha, Chocolate."
+    )
+    assert humanize_confirm_error(raw) == raw
+
+
+def test_tool_result_for_llm_passes_bolo_catalog_error():
+    raw_err = (
+        "Recheio 'ninho' nao encontrado no cadastro. "
+        "Recheios unitarios disponiveis: Brigadeiro."
+    )
+    out = tool_result_for_llm({"error": raw_err})
+    assert out["error"] == raw_err
+    assert "get_fillings_catalog" in out.get("instruction", "").lower()
+
+
 def test_tool_result_for_llm_hides_confirm_token():
     raw = {
         "requires_confirmation": True,

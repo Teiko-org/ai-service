@@ -3,6 +3,7 @@ import re
 
 from app.config import settings
 from app.core.http_client import get_http_client
+from app.core.llm_present import prepare_tool_result_for_llm
 from app.tools import (
     actions,
     batches,
@@ -155,9 +156,12 @@ async def execute_tool(
     client = get_http_client()
     try:
         result = await executor(name, args, base_url, token, client)
+        if isinstance(result, (dict, list)):
+            result = prepare_tool_result_for_llm(name, result)
+            result = sanitize_for_llm(result)
         # PII guard: log tool name only, never argument values.
         logger.info("Tool executada: %s", name)
-        return sanitize_for_llm(result) if isinstance(result, (dict, list)) else result
+        return result
     except Exception as exc:
         detail = str(exc).strip() or type(exc).__name__
         logger.error("Erro ao executar tool %s: %s", name, detail, exc_info=True)

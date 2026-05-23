@@ -9,7 +9,9 @@ Nucleo do servico: client Gemini, loop de function calling com fallback automati
 | `assistant.py`   | `CarambolosAssistant` — orquestra ask() e generate_insights() com fallback |
 | `gemini.py`      | Singleton do `genai.Client` (inicializado com API key)               |
 | `prompts.py`     | SYSTEM_PROMPT e INSIGHTS_PROMPT (persona + regras + politica de conteudo) |
+| `model_catalog.py` | Cadeia padrao de modelos Gemini (texto + tools; exclui Live/TTS/imagem) |
 | `model_manager.py` | Gerenciador de modelos com fallback automatico e cooldown por modelo |
+| `api_key_manager.py` | Rotacao de `GEMINI_API_KEYS` em 429/503 |
 | `alerts.py`      | Heuristicas de alertas V2, cache e refresh em background (lifespan)  |
 | `sessions.py`    | SessionStore in-memory com TTL, cleanup automatico e historico       |
 | `cache.py`       | SimpleCache thread-safe com TTL (usado para insights e alertas)     |
@@ -38,10 +40,10 @@ O `_generate_with_fallback()` encapsula toda chamada ao Gemini:
 4. 404 (modelo invalido): cooldown longo no modelo, sem trocar de chave
 5. Tentativas ate `max(9, keys * models)`; se esgotar chaves e modelos, `RateLimitError`
 
-Modelos disponiveis (ordem de prioridade, definidos em `config.py`):
-- `gemini-2.5-flash-lite` — 15 RPM, 1.000 RPD (principal)
-- `gemini-2.5-flash` — 10 RPM, 250 RPD
-- `gemini-2.5-pro` — 5 RPM, 100 RPD
+Cadeia padrao (`DEFAULT_GEMINI_FALLBACK_MODELS` em `model_catalog.py`; `GEMINI_MODEL` vem primeiro; override via `GEMINI_FALLBACK_MODELS` no `.env`):
+- `gemini-2.5-flash-lite` → `gemini-2.5-flash` → `gemini-3.1-flash-lite` → `gemini-3.5-flash` → `gemini-2.5-pro`
+
+Descobrir modelos habilitados na chave: `python scripts/list_gemini_models.py` na raiz do `ai-service`.
 
 ## Sessoes de conversa (sessions.py)
 

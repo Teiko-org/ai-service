@@ -22,6 +22,14 @@ ACTIVE_BATCH_RULE = (
     "(troca em uma confirmacao) ou close_batch (encerra)."
 )
 
+BATCH_STATUS_LANGUAGE = (
+    "ATIVA/ativo=true = aberta no sistema (nao encerrada), NAO significa 'forno "
+    "rolando agora'. Sempre separe: status no sistema (aberta vs encerrada) e "
+    "periodo no calendario (futuro, em curso, ja passou). get_next_batch pode "
+    "retornar fornada aberta com periodo futuro — diga que esta aberta no app e "
+    "que o periodo comeca na data X. Evite 'esta ativa' ou 'em andamento' sozinhos."
+)
+
 CAKE_FILLING_MODES = (
     "Recheio: exatamente um modo — recheio_exclusivo_id/recheio_exclusivo_nome, "
     "OU recheio_unitario_id/recheio_nome, OU par recheio_unitario_1 + "

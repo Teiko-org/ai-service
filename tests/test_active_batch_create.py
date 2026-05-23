@@ -41,7 +41,10 @@ async def test_create_batch_blocked_when_any_active_exists():
         client,
     )
 
-    assert "error" in result
-    assert "fornada ativa" in result["error"].lower()
-    assert "#5" in result["error"]
+    assert result.get("requires_confirmation") is True
+    assert result.get("action") == "replace_active_batch"
+    assert result.get("confirm_token")
+    assert "14" not in str(result.get("message", ""))  # preview usa datas do pedido
+    assert "Confirma" in (result.get("message") or "")
     client.post.assert_not_called()
+    client.delete.assert_not_called()

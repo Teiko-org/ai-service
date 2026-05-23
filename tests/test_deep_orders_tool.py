@@ -58,7 +58,7 @@ async def test_get_orders_by_status_uppercases_input():
         result = await execute_tool(
             "get_orders_by_status", {"status": "pendente"}, "http://x", "tok"
         )
-    assert result["data"] == [{"id": 1}]
+    assert result["data"][0]["pedido_numero"] == 1
     url = client.get.call_args[0][0]
     assert url.endswith("/resumo-pedido/status/PENDENTE")
 
@@ -83,7 +83,7 @@ async def test_get_orders_by_delivery_date_with_status_filter():
             "http://x",
             "tok",
         )
-    assert result["data"] == [{"id": 7}]
+    assert result["data"][0]["pedido_numero"] == 7
     kwargs = client.get.call_args.kwargs
     assert kwargs["params"]["dataEntrega"] == "2026-05-12"
     assert kwargs["params"]["status"] == "PAGO"
@@ -116,7 +116,7 @@ async def test_get_orders_by_dough_passes_status_when_present():
     url = client.get.call_args[0][0]
     assert url.endswith("/resumo-pedido/pedido-bolo/por-massa/4")
     assert client.get.call_args.kwargs["params"]["status"] == "CONCLUIDO"
-    assert result["data"] == [{"id": 1}]
+    assert result["data"][0]["pedido_numero"] == 1
     assert result["total"] == 1
     assert result["truncated"] is False
 
@@ -138,10 +138,10 @@ async def test_get_orders_by_dough_trims_large_duplicate_list():
             "http://x",
             "tok",
         )
-    assert result["returned"] == 10
+    assert result["returned"] == 8
     assert result["truncated"] is True
     assert result["total"] == 24  # 24 unicos + 1 duplicata do id 1
-    assert len(result["data"]) == 10
+    assert len(result["data"]) == 8
 
 
 @pytest.mark.asyncio

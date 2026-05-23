@@ -1,0 +1,15 @@
+{
+  "_comment": "OPCIONAL. Padrao do runner: --dynamic-ids lista pedidos/massas/fornada no sistema e substitui 42, 15, etc. Use este arquivo para datas fixas ou --static-ids.",
+  "_dynamic_ids_default": "nao precisa preencher order_id se usar run_roteiro.py sem --static-ids",
+  "delivery_date": "2026-05-15",
+  "delivery_date_iso": "2026-05-15",
+  "fornada_inicio": "10/06/2026",
+  "fornada_fim": "16/06/2026",
+  "fornada_substituir_inicio": "20/06/2026",
+  "fornada_substituir_fim": "26/06/2026",
+  "batch_month_label": "janeiro de 2026",
+  "batch_close_1": 14,
+  "batch_close_2": 15,
+  "massa_nome": "Cacau",
+  "pedido_retirada_data": "10/06/2026"
+}

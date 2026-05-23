@@ -53,6 +53,26 @@ def parse_resumo_order_id(value: object) -> int:
     )
 
 
+_ORDER_IDS_IN_TEXT_RE = re.compile(
+    r"(?:pedido\s*#?\s*|#\s*)(\d+)",
+    re.IGNORECASE,
+)
+
+
+def extract_order_ids_from_text(text: str) -> list[int]:
+    """Extrai numeros de pedido (#3019, pedido 3019) de uma frase do usuario."""
+    if not text or not str(text).strip():
+        return []
+    seen: set[int] = set()
+    out: list[int] = []
+    for m in _ORDER_IDS_IN_TEXT_RE.finditer(str(text)):
+        n = int(m.group(1))
+        if n > 0 and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
 def parse_resumo_order_id_list(values: object) -> list[int]:
     """Lista de ids de resumo (para WhatsApp consolidado, etc.)."""
     if values is None:

@@ -40,10 +40,49 @@ async def test_resolve_massa_by_name_returns_id_and_label():
 
 
 @pytest.mark.asyncio
-async def test_resolve_massa_not_found_raises():
+async def test_resolve_massa_not_found_lists_available():
     client = _client_with_catalog({"/bolos/massa": [{"id": 1, "sabor": "Baunilha"}]})
-    with pytest.raises(WriteToolError, match="nao encontrada"):
+    with pytest.raises(WriteToolError, match="Massas disponiveis") as exc:
         await resolver.resolve_massa_id(client, "http://x", "tok", "morango")
+    assert "Baunilha" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_resolve_recheio_by_name_not_found_lists_both_catalogs():
+    client = _client_with_catalog(
+        {
+            "/bolos/recheio-unitario": [{"id": 5, "sabor": "Brigadeiro"}],
+            "/bolos/recheio-exclusivo": [{"id": 10, "nome": "Hugo"}],
+        }
+    )
+    with pytest.raises(WriteToolError, match="Combinacoes nomeadas") as exc:
+        await resolver.resolve_recheio_by_name(client, "http://x", "tok", "ninho")
+    msg = str(exc.value)
+    assert "Brigadeiro" in msg
+    assert "Hugo" in msg
+
+
+@pytest.mark.asyncio
+async def test_apply_catalog_names_reports_massa_and_recheio_together():
+    client = _client_with_catalog(
+        {
+            "/bolos/massa": [{"id": 1, "sabor": "cacau"}],
+            "/bolos/recheio-unitario": [{"id": 5, "sabor": "brigadeiro"}],
+            "/bolos/recheio-exclusivo": [],
+        }
+    )
+    with pytest.raises(WriteToolError) as exc:
+        await resolver.apply_catalog_names(
+            {"massa_nome": "chocolate", "recheio_nome": "ninho"},
+            client,
+            "http://x",
+            "tok",
+        )
+    msg = str(exc.value)
+    assert "Massa 'chocolate'" in msg
+    assert "Recheio 'ninho'" in msg
+    assert "Massas disponiveis" in msg
+    assert "Sabores avulsos" in msg or "Combinacoes nomeadas" in msg
 
 
 @pytest.mark.asyncio
@@ -86,6 +125,7 @@ async def test_apply_catalog_names_fills_ids_and_labels():
     client = _client_with_catalog(
         {
             "/bolos/massa": [{"id": 1, "sabor": "Baunilha"}],
+            "/bolos/recheio-unitario": [],
             "/bolos/recheio-exclusivo": [{"id": 9, "nome": "Hugo"}],
         }
     )
