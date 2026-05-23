@@ -507,9 +507,6 @@ def _label_from_catalog(args: dict, key: str, fallback: str) -> str:
 
 
 def _massa_display(args: dict, massa_id: int) -> str:
-    nome = args.get("massa_nome")
-    if isinstance(nome, str) and nome.strip():
-        return nome.strip()
     return _label_from_catalog(args, "massa", f"massa #{massa_id}")
 
 
@@ -520,10 +517,6 @@ def _recheio_display(
     ru1: int | None,
     ru2: int | None,
 ) -> str:
-    for key in ("recheio_exclusivo_nome", "recheio_nome"):
-        text = args.get(key)
-        if isinstance(text, str) and text.strip():
-            return text.strip()
     labeled = _label_from_catalog(args, "recheio", "")
     if labeled:
         return labeled

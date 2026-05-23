@@ -1,7 +1,7 @@
 import time
 import threading
 import logging
-from app.config import settings, FALLBACK_MODELS
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -15,11 +15,12 @@ class ModelManager:
         self._cooldowns: dict[str, float] = {}
         self._lock = threading.Lock()
 
-        primary = settings.gemini_model
-        if primary in FALLBACK_MODELS:
-            self._models = [primary] + [m for m in FALLBACK_MODELS if m != primary]
-        else:
-            self._models = [primary] + FALLBACK_MODELS
+        self._models = settings.model_chain
+        logger.info(
+            "Cadeia de modelos Gemini (%d): %s",
+            len(self._models),
+            " -> ".join(self._models),
+        )
 
     def get_model(self) -> str:
         with self._lock:
@@ -79,12 +80,17 @@ class ModelManager:
     def get_status(self) -> dict:
         now = time.time()
         with self._lock:
-            return {
+            models = {
                 model: {
                     "available": now >= self._cooldowns.get(model, 0),
                     "cooldown_remaining": max(0, self._cooldowns.get(model, 0) - now),
                 }
                 for model in self._models
+            }
+            return {
+                "chain": list(self._models),
+                "primary": self._models[0] if self._models else None,
+                "models": models,
             }
 
 

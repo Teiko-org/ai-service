@@ -67,6 +67,8 @@ cp .env.example .env
 
 | `GEMINI_MODEL` | Nao | Modelo principal (default: `gemini-2.5-flash-lite`) |
 
+| `GEMINI_FALLBACK_MODELS` | Nao | Modelos extras em 429/503, separados por virgula. Se vazio, usa a cadeia padrao em `app/core/model_catalog.py` |
+
 | `CARAMBOLOS_API_URL` | Nao | URL do backend Java (default: `http://localhost:8080`) |
 
 | `ALLOWED_ORIGINS` | Nao | CORS origins separados por virgula |
@@ -85,7 +87,7 @@ cp .env.example .env
 
 \* Use `GEMINI_API_KEY` **ou** `GEMINI_API_KEYS` (minimo uma chave). Com 3 chaves, em 429/503 o servico troca de modelo e depois de conta antes de falhar.
 
-**Fallback Gemini:** por chamada, tenta modelos (`flash-lite` → `flash` → `pro`); se todos esgotarem na mesma chave, passa para a proxima em `GEMINI_API_KEYS`. Status em `GET /api/v1/models-status` (`models` + `api_keys`).
+**Fallback Gemini:** em cada chamada, tenta a cadeia de modelos (padrao: `flash-lite` → `flash` → `3.1-flash-lite` → `3.5-flash` → `2.5-pro`); se esgotarem na mesma chave, passa para a proxima em `GEMINI_API_KEYS`. Status em `GET /api/v1/models-status` (`model_chain`, `model_primary`, cooldown por modelo e por chave). Para ver o que sua API key suporta: `python scripts/list_gemini_models.py --suggest-chain`.
 
 ## Rodar
 
@@ -121,7 +123,7 @@ Swagger UI disponivel em http://localhost:8000/docs
 
 | GET | `/api/v1/suggested-prompts` | Prompts pre-definidos (pills) |
 
-| GET | `/api/v1/models-status` | Cooldown de modelos e API keys (sem expor segredos) |
+| GET | `/api/v1/models-status` | Cadeia de modelos, cooldown por modelo e por API key (sem expor segredos) |
 
 
 
@@ -147,7 +149,7 @@ app/
 
 ├── main.py              # FastAPI + CORS + rate limiting + lifespan
 
-├── config.py            # Configuracao via .env + lista de modelos fallback
+├── config.py            # Configuracao via .env + cadeia de modelos (GEMINI_FALLBACK_MODELS)
 
 ├── api/
 
@@ -163,7 +165,9 @@ app/
 
 │   ├── gemini.py        # Client Gemini (singleton)
 
+│   ├── model_catalog.py # Cadeia padrao de modelos (texto + tools)
 │   ├── model_manager.py # Fallback e cooldown entre modelos
+│   ├── api_key_manager.py # Rotacao de chaves em 429/503
 
 │   ├── alerts.py        # Heuristicas de alertas + cache
 
@@ -235,8 +239,35 @@ app/
 
 ## Scripts (opcional)
 
+### Smoke rapido
 
+- `scripts/smoke_stack.py` — backend + AI; `--with-ask` (Gemini) e `--with-writes` (preview de escrita, sem commit)
 
-- `scripts/smoke_stack.py` — checagens rapidas contra backend e AI; flags `--with-ask` (Gemini) e `--with-writes` (preview de escrita, sem commit)
+### Modelos Gemini
+
+- `scripts/list_gemini_models.py` — lista modelos da sua chave; `--suggest-chain` sugere `GEMINI_MODEL` + `GEMINI_FALLBACK_MODELS`
+
+### Roteiro de QA do assistente (Kuroko)
+
+Roteiro manual: `scripts/ROTEIRO_KUROKO_ASSISTANTE.md`. Runner automatico (mesmo fluxo do app, via `POST /api/v1/ask`):
+
+```powershell
+cd ai-service
+.\.venv\Scripts\python.exe scripts\run_roteiro.py --dry-run
+.\.venv\Scripts\python.exe scripts\run_roteiro.py --read-only --delay 20
+.\.venv\Scripts\python.exe scripts\run_roteiro.py --with-writes --auto-confirm --delay 20
+```
+
+| Flag | Uso |
+|------|-----|
+| `--dynamic-ids` (padrao) | Lista pedidos/massas/fornada no sistema e substitui IDs do roteiro |
+| `--static-ids` + `--config` | IDs fixos em `scripts/roteiro_config.json` |
+| `--from N --to M` | So um intervalo de passos |
+| `--resume` | Mescla com `reports/roteiro_checkpoint.json` ou ultimo relatorio parcial |
+| `--merge-from reports/roteiro_run_X.json` | Mescla com um relatorio anterior |
+
+Saidas em `reports/` (gitignored): `roteiro_run_*.json` + `.md`, checkpoint a cada passo. Em crash, o relatorio parcial e salvo (`status`: `partial` / `crashed`). Limpeza: apague arquivos antigos em `reports/` quando nao precisar mais (mantenha o ultimo par `.json`/`.md`).
+
+Detalhes e exemplos de retomada: secao 9 do `ROTEIRO_KUROKO_ASSISTANTE.md`.
 
 

@@ -13,10 +13,15 @@ a resposta enriquecida inclui `pedido_numero` = id do resumo (#3014 no app).
 import google.genai as genai
 import httpx
 
+from app.core.llm_present import trim_orders_for_llm as _trim_orders_for_llm
+from app.tools.order_filters import (
+    fetch_orders_by_delivery_date as _fetch_orders_by_delivery_date,
+    fetch_orders_by_mass_ids as _fetch_orders_by_mass_ids,
+    resolve_mass_ids_for_name as _resolve_mass_ids_for_name,
+)
 from app.tools.order_ref import parse_resumo_order_id
 
 _VALID_STATUS = {"PENDENTE", "PAGO", "CONCLUIDO", "CANCELADO"}
-_MAX_ORDERS_FOR_LLM = 10
 
 
 def _enrich_cake_detail_for_llm(detail: dict, pedido_numero_resumo: int) -> dict:
@@ -32,54 +37,6 @@ def _enrich_cake_detail_for_llm(detail: dict, pedido_numero_resumo: int) -> dict
         "pedido de bolo — nao cite esse valor como numero do pedido."
     )
     return enriched
-
-
-def _order_sort_key(item: dict) -> str:
-    for field in ("dataPedido", "dataEntrega"):
-        value = item.get(field)
-        if value:
-            return str(value)
-    return ""
-
-
-def _dedupe_orders_by_id(orders: list) -> list:
-    seen: set = set()
-    unique: list = []
-    for item in orders:
-        if not isinstance(item, dict):
-            continue
-        order_id = item.get("id")
-        if order_id in seen:
-            continue
-        seen.add(order_id)
-        unique.append(item)
-    return unique
-
-
-def _trim_orders_for_llm(
-    orders: list, *, limit: int = _MAX_ORDERS_FOR_LLM
-) -> dict:
-    """Dedupe, ordena por data mais recente e limita payload para o Gemini."""
-    if not orders:
-        return {"data": [], "total": 0, "returned": 0, "truncated": False}
-
-    unique = _dedupe_orders_by_id(orders)
-    sorted_orders = sorted(unique, key=_order_sort_key, reverse=True)
-    total = len(sorted_orders)
-    page = sorted_orders[:limit]
-    truncated = total > len(page)
-    result: dict = {
-        "data": page,
-        "total": total,
-        "returned": len(page),
-        "truncated": truncated,
-    }
-    if truncated:
-        result["message"] = (
-            f"Mostrando os {len(page)} pedidos mais recentes "
-            f"(de {total} encontrados no sistema)."
-        )
-    return result
 
 
 def _api_error_message(resp: httpx.Response, default: str) -> str:
@@ -201,7 +158,9 @@ DECLARATIONS = [
             properties={
                 "delivery_date": genai.types.Schema(
                     type=genai.types.Type.STRING,
-                    description="Data de entrega no formato YYYY-MM-DD.",
+                    description=(
+                        "Data de entrega: dd/MM/yyyy (ex.: 10/01/2025) ou yyyy-MM-dd."
+                    ),
                 ),
                 "status": genai.types.Schema(
                     type=genai.types.Type.STRING,
@@ -215,18 +174,23 @@ DECLARATIONS = [
     genai.types.FunctionDeclaration(
         name="get_orders_by_dough",
         description=(
-            "Lista pedidos de bolo que usam uma massa especifica (pelo ID da "
-            "massa). Retorna ate os 10 mais recentes (campo total = quantidade "
-            "no sistema). Util para 'quais pedidos usam massa de chocolate?'. "
-            "Antes, descubra o ID com a tool de catalogo se o usuario citar "
-            "o nome."
+            "Lista pedidos de bolo por massa. Informe dough_id OU massa_nome "
+            "(ex.: cacau, chocolate). Inclui todos os ids de cadastro com o "
+            "mesmo sabor. Ate 8 pedidos mais recentes no retorno."
         ),
         parameters=genai.types.Schema(
             type=genai.types.Type.OBJECT,
             properties={
                 "dough_id": genai.types.Schema(
                     type=genai.types.Type.INTEGER,
-                    description="ID da massa.",
+                    description="ID da massa (opcional se massa_nome for informado).",
+                ),
+                "massa_nome": genai.types.Schema(
+                    type=genai.types.Type.STRING,
+                    description=(
+                        "Nome/sabor da massa (ex.: cacau). Preferivel quando o "
+                        "usuario citar o sabor em vez do id."
+                    ),
                 ),
                 "status": genai.types.Schema(
                     type=genai.types.Type.STRING,
@@ -234,7 +198,6 @@ DECLARATIONS = [
                     description="Status para filtrar (opcional).",
                 ),
             },
-            required=["dough_id"],
         ),
     ),
     genai.types.FunctionDeclaration(
@@ -420,46 +383,41 @@ async def execute(
 
     if name == "get_orders_by_delivery_date":
         delivery_date = args.get("delivery_date")
-        if not delivery_date:
-            return {"error": "delivery_date e obrigatorio (YYYY-MM-DD)."}
-        params: dict = {"dataEntrega": delivery_date}
-        status_filter = (args.get("status") or "").upper()
-        if status_filter:
-            if status_filter not in _VALID_STATUS:
-                return {"error": f"status invalido. Use um de {sorted(_VALID_STATUS)}."}
-            params["status"] = status_filter
-        url = f"{base_url}/resumo-pedido/pedido-bolo/por-data-entrega"
-        resp = await client.get(url, params=params, headers=headers)
-        if resp.status_code == 204:
-            return {
-                "data": [],
-                "message": f"Nenhum pedido para entrega em {delivery_date}.",
-            }
-        resp.raise_for_status()
-        raw = resp.json()
-        if not isinstance(raw, list):
-            raw = []
-        return _trim_orders_for_llm(raw)
+        status_filter = (args.get("status") or "").upper() or None
+        if status_filter and status_filter not in _VALID_STATUS:
+            return {"error": f"status invalido. Use um de {sorted(_VALID_STATUS)}."}
+        return await _fetch_orders_by_delivery_date(
+            client, base_url, token, delivery_date, status_filter
+        )
 
     if name == "get_orders_by_dough":
         dough_id = args.get("dough_id")
-        if dough_id is None:
-            return {"error": "dough_id e obrigatorio."}
-        params = {}
-        status_filter = (args.get("status") or "").upper()
-        if status_filter:
-            if status_filter not in _VALID_STATUS:
-                return {"error": f"status invalido. Use um de {sorted(_VALID_STATUS)}."}
-            params["status"] = status_filter
-        url = f"{base_url}/resumo-pedido/pedido-bolo/por-massa/{dough_id}"
-        resp = await client.get(url, params=params, headers=headers)
-        if resp.status_code == 204:
-            return {"data": [], "message": "Nenhum pedido encontrado para essa massa."}
-        resp.raise_for_status()
-        raw = resp.json()
-        if not isinstance(raw, list):
-            raw = []
-        return _trim_orders_for_llm(raw)
+        massa_nome = args.get("massa_nome")
+        status_filter = (args.get("status") or "").upper() or None
+        if status_filter and status_filter not in _VALID_STATUS:
+            return {"error": f"status invalido. Use um de {sorted(_VALID_STATUS)}."}
+        massa_ids: list[int] = []
+        if dough_id is not None:
+            try:
+                massa_ids = [int(dough_id)]
+            except (TypeError, ValueError):
+                return {"error": "dough_id invalido."}
+        elif isinstance(massa_nome, str) and massa_nome.strip():
+            massa_ids, err = await _resolve_mass_ids_for_name(
+                client, base_url, token, massa_nome.strip()
+            )
+            if err:
+                return err
+        else:
+            return {"error": "Informe dough_id ou massa_nome."}
+        result = await _fetch_orders_by_mass_ids(
+            client, base_url, token, massa_ids, status_filter
+        )
+        if not result.get("data") and not result.get("error"):
+            result["message"] = (
+                "Nenhum pedido de bolo encontrado para essa massa no cadastro atual."
+            )
+        return result
 
     if name == "get_orders_by_filling":
         filling_id = args.get("filling_id")

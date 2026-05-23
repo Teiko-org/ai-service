@@ -134,6 +134,7 @@ class CarambolosAssistant:
         pending_confirmation: dict | None,
         max_rounds: int,
     ) -> tuple:
+        whatsapp_text: str | None = None
         round_idx = 0
         while round_idx < max_rounds:
             function_calls = self._function_call_parts(response)
@@ -175,6 +176,15 @@ class CarambolosAssistant:
                         "message": result.get("message") or "",
                     }
 
+                if (
+                    tool_name == "generate_whatsapp_message"
+                    and isinstance(result, dict)
+                    and result.get("ok")
+                ):
+                    raw_text = result.get("message_text")
+                    if isinstance(raw_text, str) and raw_text.strip():
+                        whatsapp_text = raw_text.strip()
+
                 function_responses.append(
                     genai.types.Part.from_function_response(
                         name=tool_name, response={"result": llm_result}
@@ -191,7 +201,14 @@ class CarambolosAssistant:
             response, _ = await self._generate_with_fallback(contents, config)
             round_idx += 1
 
-        return response, contents, tools_used, pending_confirmation, max_rounds
+        return (
+            response,
+            contents,
+            tools_used,
+            pending_confirmation,
+            max_rounds,
+            whatsapp_text,
+        )
 
     async def _generate_with_fallback(self, contents, config) -> tuple:
         """Try generating content; fallback models, then API keys on 429/503."""
@@ -330,6 +347,7 @@ class CarambolosAssistant:
     async def ask(self, question: str, history: list[dict] | None = None) -> dict:
         tools_used: list[str] = []
         pending_confirmation: dict | None = None
+        whatsapp_text: str | None = None
         max_rounds = MAX_TOOL_ROUNDS_READ
 
         config = genai.types.GenerateContentConfig(
@@ -346,15 +364,20 @@ class CarambolosAssistant:
         )
 
         response, model = await self._generate_with_fallback(contents, config)
-        response, contents, tools_used, pending_confirmation, max_rounds = (
-            await self._run_tool_rounds(
-                response,
-                contents,
-                config,
-                tools_used,
-                pending_confirmation,
-                max_rounds,
-            )
+        (
+            response,
+            contents,
+            tools_used,
+            pending_confirmation,
+            max_rounds,
+            whatsapp_text,
+        ) = await self._run_tool_rounds(
+            response,
+            contents,
+            config,
+            tools_used,
+            pending_confirmation,
+            max_rounds,
         )
 
         answer = self._extract_text_from_response(response)
@@ -368,16 +391,23 @@ class CarambolosAssistant:
                 )
             )
             response, model = await self._generate_with_fallback(contents, config)
-            response, contents, tools_used, pending_confirmation, max_rounds = (
-                await self._run_tool_rounds(
-                    response,
-                    contents,
-                    config,
-                    tools_used,
-                    pending_confirmation,
-                    max_rounds,
-                )
+            (
+                response,
+                contents,
+                tools_used,
+                pending_confirmation,
+                max_rounds,
+                wa_retry,
+            ) = await self._run_tool_rounds(
+                response,
+                contents,
+                config,
+                tools_used,
+                pending_confirmation,
+                max_rounds,
             )
+            if wa_retry:
+                whatsapp_text = wa_retry
             answer = self._extract_text_from_response(response)
 
         if not answer and tools_used:
@@ -385,6 +415,8 @@ class CarambolosAssistant:
 
         if pending_confirmation and pending_confirmation.get("message"):
             answer = pending_confirmation["message"]
+        elif whatsapp_text and "generate_whatsapp_message" in tools_used:
+            answer = whatsapp_text
         elif not answer and any(_is_write_tool(t) for t in tools_used):
             answer = self._fallback_answer(tools_used)
 

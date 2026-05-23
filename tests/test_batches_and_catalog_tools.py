@@ -26,7 +26,8 @@ async def test_get_next_batch_returns_payload():
     client = _client(_resp(200, {"id": 5, "dataInicio": "2026-05-15"}))
     with patch("app.tools.registry.get_http_client", return_value=client):
         result = await execute_tool("get_next_batch", {}, "http://x", "tok")
-    assert result["id"] == 5
+    assert result["fornada"]["numero"] == 5
+    assert "instruction" in result
     assert client.get.call_args[0][0].endswith("/fornadas/proxima")
 
 
@@ -44,7 +45,8 @@ async def test_get_active_batches_calls_correct_endpoint():
     client = _client(_resp(200, [{"id": 1}, {"id": 2}]))
     with patch("app.tools.registry.get_http_client", return_value=client):
         result = await execute_tool("get_active_batches", {}, "http://x", "tok")
-    assert result["data"] == [{"id": 1}, {"id": 2}]
+    assert result["total"] == 2
+    assert result["fornadas"][0]["numero"] == 1
     assert client.get.call_args[0][0].endswith("/fornadas")
 
 

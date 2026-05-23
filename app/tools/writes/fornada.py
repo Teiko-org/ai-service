@@ -340,6 +340,17 @@ async def _execute_create_batch(
 
     active = await find_active_batch(client, base_url, token)
     if active:
+        if not confirmed:
+            return await _execute_replace_active_batch(
+                {
+                    "data_inicio": args.get("data_inicio"),
+                    "data_fim": args.get("data_fim"),
+                    "confirmed": False,
+                },
+                base_url,
+                token,
+                client,
+            )
         return {"error": active_batch_error_message(active)}
 
     if not confirmed:

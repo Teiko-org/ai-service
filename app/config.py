@@ -2,12 +2,10 @@ import logging
 
 from pydantic_settings import BaseSettings
 
+from app.core.model_catalog import DEFAULT_GEMINI_FALLBACK_MODELS
 
-FALLBACK_MODELS = [
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-]
+# Retrocompat: testes e imports antigos.
+FALLBACK_MODELS = list(DEFAULT_GEMINI_FALLBACK_MODELS)
 
 _MIN_SECRET_LEN = 24
 
@@ -18,6 +16,8 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_api_keys: str = ""
     gemini_model: str = "gemini-2.5-flash-lite"
+    # Lista extra de modelos para fallback (virgula). Se vazio, usa DEFAULT_GEMINI_FALLBACK_MODELS.
+    gemini_fallback_models: str = ""
     carambolos_api_url: str = "http://localhost:8080"
     allowed_origins: str = "http://localhost:8081,http://localhost:19006"
     log_level: str = "INFO"
@@ -44,6 +44,19 @@ class Settings(BaseSettings):
     @staticmethod
     def _split_keys(raw: str) -> list[str]:
         return [key.strip() for key in raw.split(",") if key.strip()]
+
+    @property
+    def fallback_models_list(self) -> list[str]:
+        if self.gemini_fallback_models.strip():
+            return self._split_keys(self.gemini_fallback_models)
+        return list(DEFAULT_GEMINI_FALLBACK_MODELS)
+
+    @property
+    def model_chain(self) -> list[str]:
+        """Ordem efetiva: GEMINI_MODEL + fallbacks (sem duplicar)."""
+        from app.core.model_catalog import build_model_chain
+
+        return build_model_chain(self.gemini_model, self.fallback_models_list)
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

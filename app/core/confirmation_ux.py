@@ -15,17 +15,32 @@ def _is_business_rule_error(message: str) -> bool:
     return any(m in low for m in markers)
 
 
-def humanize_confirm_error(message: str) -> str:
+def _is_bolo_catalog_error(message: str) -> bool:
     low = (message or "").lower()
+    return (
+        "massas disponiveis" in low
+        or "recheios unitarios disponiveis" in low
+        or "recheios exclusivos disponiveis" in low
+        or ("massa '" in low and "nao encontrada no cadastro" in low)
+        or ("recheio '" in low and "nao encontrado no cadastro" in low)
+    )
+
+
+def humanize_confirm_error(message: str) -> str:
+    raw = (message or "").strip()
+    if _is_bolo_catalog_error(raw):
+        return raw
+    low = raw.lower()
     if "fornada ativa" in low and "create_batch" in low:
         return (
-            "Ja existe uma fornada em andamento. "
-            "Quer substituir pela nova (mesmas datas) ou so encerrar a atual?"
+            "Ja existe uma fornada aberta no sistema. "
+            "Use o botao Confirmar na previa de substituicao, ou diga "
+            "'substituir' (nova fornada) / 'so encerrar' (fecha a atual)."
         )
     if "fornada ativa" in low:
         return (
-            "Ja existe uma fornada em andamento. "
-            "Encerre a atual ou peca para substituir pela nova."
+            "Ja existe uma fornada aberta no sistema. "
+            "Diga 'substituir' com as datas desejadas ou 'so encerrar'."
         )
     if "expirou" in low:
         return (
@@ -106,6 +121,17 @@ def tool_result_for_llm(result: dict) -> dict:
 
     if result.get("error"):
         raw = str(result["error"])
+        if _is_bolo_catalog_error(raw):
+            return {
+                "error": raw,
+                "instruction": (
+                    "Repasse ao usuario o erro completo (massa e recheio juntos, "
+                    "se houver). Use os nomes legiveis do erro — combinacoes nomeadas "
+                    "no formato Nome (Sabor1 + Sabor2). NAO chame get_fillings_catalog "
+                    "nem despeje lista enorme de sabores avulsos. Peca um pedido "
+                    "corrigido; nao peca confirmacao."
+                ),
+            }
         low = raw.lower()
         if any(
             x in low
@@ -129,11 +155,11 @@ def tool_result_for_llm(result: dict) -> dict:
             return {
                 "error": humanize_confirm_error(raw),
                 "instruction": (
-                    "Explique o erro ao usuario. Se ja houver fornada ativa, "
-                    "NAO peca confirmacao de create_batch — ofereca substituir "
-                    "(replace_active_batch com as mesmas datas) ou encerrar (close_batch). "
-                    "Se o usuario aceitar substituir, chame replace_active_batch com "
-                    "confirmed=False primeiro."
+                    "Fornada ativa: chame replace_active_batch (confirmed=False) "
+                    "com as datas que o usuario pediu — o servidor mostra previa "
+                    "e botao Confirmar. Para so encerrar, close_batch (confirmed=False). "
+                    "Nao fique repetindo a pergunta se o usuario ja disse sim: "
+                    "execute a tool adequada."
                 ),
             }
         return {

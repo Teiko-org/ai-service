@@ -159,9 +159,10 @@ async def test_whatsapp_message_does_not_require_confirmation():
             "tok",
         )
 
-    assert result["ok"] is True
     assert result["message_text"] == text
     assert result["order_ids"] == [1, 2, 3]
+    assert "instruction" in result
+    assert "WhatsApp" in result["instruction"]
     client.post.assert_called_once()
     payload = client.post.call_args.kwargs["json"]
     assert payload == {"idsResumo": [1, 2, 3]}

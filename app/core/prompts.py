@@ -1,5 +1,6 @@
 from app.core.prompt_contracts import (
     ACTIVE_BATCH_RULE,
+    BATCH_STATUS_LANGUAGE,
     CAKE_FILLING_MODES,
     NEVER_ASK_IDS,
     ORDER_NUMBER_RULE,
@@ -41,8 +42,9 @@ ACOES DE ESCRITA:
 
 FORNADAS:
 - {ACTIVE_BATCH_RULE}
+- {BATCH_STATUS_LANGUAGE}
 - `create_batch`: cria + ja deixa ativa. `add_batch_lines`: produtos por nome (omita `fornada_id` para usar a ativa/ultima). `close_batch`: encerra uma ou varias (`fornada_ids` quando houver mais de uma). `replace_active_batch`: encerra + cria em uma confirmacao.
-- Leitura: `get_active_batch_with_products` (ativa + itens), `get_next_batch`, `get_all_batches`, `get_batches_by_month`.
+- Leitura: `get_active_batch_with_products` (fornada aberta no app + itens), `get_next_batch` (proxima com inicio futuro), `get_all_batches`, `get_batches_by_month`.
 - `get_latest_batch_kpi` = ultima ENCERRADA. `get_latest_batch_products` = ATIVA mais recente.
 - Previa: uma frase curta + "Confirma?" — sem cronometro, sem web.
 
@@ -60,15 +62,25 @@ RELATORIO PDF (REGRA CRITICA):
 - Apos a chamada, responda em UMA frase: "Pronto, gerei o relatorio de insights. Clique no botao abaixo para baixar o PDF." NAO descreva o conteudo.
 
 WHATSAPP:
-- `generate_whatsapp_message` apenas LE/gera texto (sem confirmacao). Devolva o texto entre aspas, sem comentarios extras.
+- `generate_whatsapp_message` apenas LE/gera texto (sem confirmacao). Cole o `message_text` da tool direto, sem aspas, sem "Segue o texto" nem prefacio.
+
+FORMATO VISUAL (todas as listas — pedidos, massas, recheios, fornada):
+- Um item por linha; deixe uma linha em branco entre itens (facilita leitura no app).
+- Nunca use formato de banco (`id: 1, sabor: cacau_expresso`, `recheio_unitario`, snake_case).
+- Use os nomes legiveis que a tool devolve (`nome`, `cliente`, `status`, `pedido_numero`).
+- Pedidos: copie o campo `linha` de cada item (ex.: Pedido #3019 (Bolo) · Maria · Pendente · R$ 175,00 · Retirada · 23/05/2026). Nunca use traco longo (—) entre campos.
+- Catalogo: "#2 · Cacau expresso". Combinacoes: "#10 · Hugo (Brigadeiro + Ninho)".
+- Fornada: numero + periodo DD/MM a DD/MM + aberta/encerrada no sistema + se o periodo ja comecou; produtos com quantidade (consolidados na tool). Nunca so "esta ativa".
 
 LISTAS GRANDES:
-- Respostas com `truncated: true` e `total > returned`: cite o total e resuma so os itens em `data` (ja sao os mais recentes).
+- Respostas com `truncated: true`: diga o total e mostre so os itens em `data` (max ~8 recentes).
+- Nao chame outra tool de catalogo se o erro ou a lista ja trouxe opcoes suficientes.
 
 DICAS:
 - Clientes frequentes: agrupe pedidos recentes por nome.
 - Tendencias: compare periodos diferentes quando possivel.
-- "Quais pedidos usam a massa N": `get_orders_by_dough(dough_id=N)`.
+- "Quais pedidos usam a massa N": `get_orders_by_dough(massa_nome=cacau)` ou dough_id.
+- Entrega em uma data: `get_orders_by_delivery_date(delivery_date=10/01/2025)` (dd/MM/yyyy).
 """
 
 INSIGHTS_PROMPT = """Com base nos dados fornecidos, gere de 3 a 5 insights priorizados para o administrador da confeitaria.
