@@ -160,7 +160,9 @@ def _parse_token(token: str) -> tuple[int, str]:
         exp_str, digest = token.split(".", 1)
         return int(exp_str), digest
     except (ValueError, AttributeError) as exc:
-        raise ConfirmTokenError("Token de confirmacao invalido.") from exc
+        raise ConfirmTokenError(
+            "Confirmacao invalida. Refaca a previa."
+        ) from exc
 
 
 def verify_and_consume(
@@ -169,10 +171,11 @@ def verify_and_consume(
     args: dict,
     session_id: str | None,
     current_history: list[dict] | None = None,
+    enforce_user_turn: bool = True,
 ) -> None:
     if not token:
         raise ConfirmTokenError(
-            "Faltou o token de confirmacao. Pec,a confirmacao antes."
+            "Aguardando confirmacao do usuario antes de executar."
         )
 
     expires_at, digest = _parse_token(token)
@@ -203,7 +206,11 @@ def verify_and_consume(
     # Peek first; only discard after the check passes so a rejected commit
     # cannot bypass the user-turn enforcement on a subsequent retry.
     meta = _issued_metadata_store.peek(token)
-    if meta is not None and current_history is not None:
+    if (
+        enforce_user_turn
+        and meta is not None
+        and current_history is not None
+    ):
         ensure_user_turn_between(meta.user_msgs_at_issue, current_history)
     _issued_metadata_store.discard(token)
 

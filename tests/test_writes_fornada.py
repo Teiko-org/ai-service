@@ -13,11 +13,30 @@ from app.tools.writes import fornada as fornada_tool
 SESSION_ID = "sess-test-1"
 
 
+_FORNADA_CATALOG = [
+    {"id": 10, "nome": "Pao Frances", "tipo": "FORNADA", "ativo": True},
+    {"id": 11, "nome": "Croissant", "tipo": "FORNADA", "ativo": True},
+]
+
+
 @pytest.fixture(autouse=True)
 def _set_secret(monkeypatch):
     monkeypatch.setattr(settings, "confirm_token_secret", "test-secret-only-for-tests")
     monkeypatch.setattr(settings, "confirm_token_ttl_seconds", 120)
+    monkeypatch.setattr(settings, "allow_anonymous_writes", False)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _mock_fornada_catalog(monkeypatch):
+    monkeypatch.setattr(
+        "app.tools.writes.product_resolve.fetch_fornada_catalog",
+        AsyncMock(return_value=_FORNADA_CATALOG),
+    )
+    monkeypatch.setattr(
+        "app.tools.writes.fornada.find_active_batch",
+        AsyncMock(return_value=None),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -133,8 +152,7 @@ async def test_create_batch_commit_without_token_errors(request_ctx):
         client,
     )
 
-    assert "error" in result
-    assert "token" in result["error"].lower()
+    assert result.get("requires_confirmation") is True
     client.post.assert_not_awaited()
 
 
@@ -279,10 +297,14 @@ async def test_create_batch_validation_rejects_end_before_start(request_ctx):
 async def test_create_batch_validation_rejects_bad_format(request_ctx):
     client = _http_client_returning()
     result = await fornada_tool.execute(
-        "create_batch", {"data_inicio": "01/06/2026", "data_fim": "07/06/2026"}, "http://x", "tok", client
+        "create_batch",
+        {"data_inicio": "10/06/2026", "data_fim": "16/06/2026"},
+        "http://x",
+        "tok",
+        client,
     )
-    assert "error" in result
-    assert "yyyy-MM-dd" in result["error"]
+    assert result.get("requires_confirmation") is True
+    assert result["payload"]["data_inicio"] == "2026-06-10"
 
 
 @pytest.mark.asyncio
@@ -333,7 +355,8 @@ async def test_add_batch_lines_preview_summary(request_ctx):
     )
 
     assert result["requires_confirmation"] is True
-    assert "10 x20" in result["message"] or "produto 10 x20" in result["message"]
+    assert "Pao Frances x20" in result["message"]
+    assert "Croissant x5" in result["message"]
     assert result["payload"]["fornada_id"] == 5
     client.post.assert_not_awaited()
 

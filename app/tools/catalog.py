@@ -9,9 +9,9 @@ DECLARATIONS = [
     genai.types.FunctionDeclaration(
         name="get_registered_products",
         description=(
-            "Lista todos os produtos cadastrados (bolos e produtos de fornada) "
-            "no catalogo da confeitaria. Use quando o usuario perguntar 'o que "
-            "tem cadastrado', 'quais produtos vendemos', etc."
+            "Lista produtos cadastrados (tipo FORNADA e BOLO). Use para listar "
+            "cardapio ao usuario ou para conferir nomes — em add_batch_lines "
+            "prefira enviar produto_nome e deixar o servidor resolver o id."
         ),
         parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
     ),
@@ -51,7 +51,17 @@ DECLARATIONS = [
         name="get_fillings_catalog",
         description=(
             "Lista os recheios unitarios cadastrados (sabores individuais). "
-            "Util para identificar opcoes de recheio."
+            "Para combinacoes nomeadas (Hugo, Dora, Bia Benego...) use "
+            "get_exclusive_fillings_catalog."
+        ),
+        parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
+    ),
+    genai.types.FunctionDeclaration(
+        name="get_exclusive_fillings_catalog",
+        description=(
+            "Lista os recheios exclusivos (combinacoes nomeadas de dois unitarios, "
+            "ex.: Hugo = brigadeiro meio amargo + brigadeiro de ninho). Use quando "
+            "o usuario citar nome de recheio que nao seja sabor unico."
         ),
         parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
     ),
@@ -65,6 +75,7 @@ _ENDPOINTS = {
     "get_cake_formats": "/bolos/formatos",
     "get_doughs_catalog": "/bolos/massa",
     "get_fillings_catalog": "/bolos/recheio-unitario",
+    "get_exclusive_fillings_catalog": "/bolos/recheio-exclusivo",
 }
 
 

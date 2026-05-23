@@ -15,6 +15,9 @@ MAX_HISTORY_PER_SESSION = 50
 class Session:
     id: str
     history: list[dict] = field(default_factory=list)
+    pending_confirmation: dict | None = None
+    last_fornada_id: int | None = None
+    last_pedido_resumo_id: int | None = None
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
 
@@ -63,6 +66,55 @@ class SessionStore:
             if not session:
                 return []
             return session.history[-limit:]
+
+    def set_pending_confirmation(
+        self, session_id: str, pending: dict | None
+    ) -> None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+            session.pending_confirmation = pending
+            session.touch()
+
+    def get_pending_confirmation(self, session_id: str) -> dict | None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return None
+            return session.pending_confirmation
+
+    def set_last_fornada_id(self, session_id: str, fornada_id: int | None) -> None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+            session.last_fornada_id = fornada_id
+            session.touch()
+
+    def get_last_fornada_id(self, session_id: str) -> int | None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return None
+            return session.last_fornada_id
+
+    def set_last_pedido_resumo_id(
+        self, session_id: str, pedido_resumo_id: int | None
+    ) -> None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+            session.last_pedido_resumo_id = pedido_resumo_id
+            session.touch()
+
+    def get_last_pedido_resumo_id(self, session_id: str) -> int | None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return None
+            return session.last_pedido_resumo_id
 
     def _cleanup(self) -> None:
         with self._lock:

@@ -17,3 +17,5 @@ current_session_id: ContextVar[str | None] = ContextVar(
 current_history: ContextVar[list[dict] | None] = ContextVar(
     "current_history", default=None
 )
+# True quando o commit vem do app/botao ou do "sim" interceptado (nao do Gemini).
+direct_user_commit: ContextVar[bool] = ContextVar("direct_user_commit", default=False)

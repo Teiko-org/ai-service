@@ -28,16 +28,15 @@ O metodo `ask()` implementa o loop de function calling do Gemini:
 
 O metodo `generate_insights()` e diferente: NAO usa function calling do Gemini. Ele chama as tools diretamente via `asyncio.gather()` (paralelo), concatena os dados, e pede ao Gemini pra analisar e gerar JSON de insights.
 
-## Fallback automatico de modelos (model_manager.py + assistant.py)
+## Fallback automatico (model_manager + api_key_manager + assistant.py)
 
 O `_generate_with_fallback()` encapsula toda chamada ao Gemini:
 
-1. `model_manager.get_model()` retorna o modelo de maior prioridade disponivel
-2. Se o Gemini retorna 429 (rate limit), extrai `retry_after` e marca o modelo em cooldown
-3. `model_manager.mark_rate_limited()` escolhe outro modelo: primeiro sem cooldown; se **todos** estiverem em cooldown, **libera o que expira mais cedo** e devolve esse nome para nova tentativa (projeto academico / free tier)
-4. Se retorna 404 (modelo invalido), marca com cooldown longo e tenta o proximo
-5. Ate `MAX_FALLBACK_ATTEMPTS=3` tentativas por chamada — se ainda falhar, levanta `RateLimitError`
-6. `RateLimitError` tambem se `mark_rate_limited` retornar `None` (caso limite, ex.: lista de modelos invalida)
+1. `api_key_manager.get_key_index()` + `model_manager.get_model()` escolhem chave e modelo
+2. Em 429/503: troca de modelo via `model_manager.mark_rate_limited()`
+3. Se nao houver modelo disponivel na chave atual: `api_key_manager.mark_rate_limited()` e nova chave (`get_client(idx)`)
+4. 404 (modelo invalido): cooldown longo no modelo, sem trocar de chave
+5. Tentativas ate `max(9, keys * models)`; se esgotar chaves e modelos, `RateLimitError`
 
 Modelos disponiveis (ordem de prioridade, definidos em `config.py`):
 - `gemini-2.5-flash-lite` — 15 RPM, 1.000 RPD (principal)
@@ -68,8 +67,8 @@ Modelos disponiveis (ordem de prioridade, definidos em `config.py`):
 
 - Todas as chamadas ao Gemini DEVEM usar `_generate_with_fallback()` para aproveitar o fallback
 - Todas as chamadas ao Gemini DEVEM ser async (`client.aio.models.generate_content`)
-- `genai.errors.APIError` com code 429 DEVE ser tratado pelo model_manager, NAO propagado direto
-- `gemini.py`, `http_client.py`, `session_store`, `cache` e `model_manager` sao singletons
+- `genai.errors.APIError` com code 429 DEVE ser tratado por model_manager e api_key_manager, NAO propagado direto
+- `gemini.py`, `http_client.py`, `session_store`, `cache`, `model_manager` e `api_key_manager` sao singletons
 - `http_client.py` e fechado via lifespan do FastAPI em `main.py`
 - O modelo Gemini vem de `model_manager.get_model()`, NUNCA hardcodar
 

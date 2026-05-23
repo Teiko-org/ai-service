@@ -5,8 +5,9 @@ DECLARATIONS = [
     genai.types.FunctionDeclaration(
         name="get_latest_batch_kpi",
         description=(
-            "Retorna os KPIs da ultima fornada encerrada: quantidade disponivel vs vendida, "
-            "valor total vs arrecadado, percentual de aproveitamento e valor perdido."
+            "KPIs da ultima fornada ENCERRADA (inativa no sistema), nao a mais nova "
+            "por data nem a ativa. NAO use para 'tem fornada em 2025?' — use "
+            "get_all_batches ou get_batches_by_month. Campos: dataInicio, dataFim, fornadaId."
         ),
         parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
     ),

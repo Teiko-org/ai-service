@@ -18,6 +18,19 @@ def store():
     yield s
 
 
+def test_last_pedido_resumo_id_round_trip(store):
+    session = store.get_or_create()
+    assert store.get_last_pedido_resumo_id(session.id) is None
+    store.set_last_pedido_resumo_id(session.id, 3014)
+    assert store.get_last_pedido_resumo_id(session.id) == 3014
+    store.set_last_pedido_resumo_id(session.id, None)
+    assert store.get_last_pedido_resumo_id(session.id) is None
+
+
+def test_last_pedido_resumo_id_unknown_session_returns_none(store):
+    assert store.get_last_pedido_resumo_id("sessao-inexistente") is None
+
+
 def test_get_or_create_new_session(store):
     session = store.get_or_create()
     assert session.id is not None

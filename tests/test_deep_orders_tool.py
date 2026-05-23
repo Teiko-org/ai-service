@@ -43,7 +43,9 @@ async def test_get_cake_order_details_resolves_via_resumo_pedido_bolo_id():
         result = await execute_tool(
             "get_cake_order_details", {"order_id": 7}, "http://x", "tok"
         )
-    assert result == {"id": 88, "massa": "Chocolate"}
+    assert result["massa"] == "Chocolate"
+    assert result["pedido_numero"] == 7
+    assert "instruction" in result
     calls = client.get.call_args_list
     assert calls[0][0][0].endswith("/resumo-pedido/7")
     assert calls[1][0][0].endswith("/resumo-pedido/pedido-bolo/detalhe/88")
@@ -105,7 +107,7 @@ async def test_get_orders_by_delivery_date_204_returns_empty_data():
 async def test_get_orders_by_dough_passes_status_when_present():
     client = _client(_resp(200, [{"id": 1}]))
     with patch("app.tools.registry.get_http_client", return_value=client):
-        await execute_tool(
+        result = await execute_tool(
             "get_orders_by_dough",
             {"dough_id": 4, "status": "CONCLUIDO"},
             "http://x",
@@ -114,14 +116,39 @@ async def test_get_orders_by_dough_passes_status_when_present():
     url = client.get.call_args[0][0]
     assert url.endswith("/resumo-pedido/pedido-bolo/por-massa/4")
     assert client.get.call_args.kwargs["params"]["status"] == "CONCLUIDO"
+    assert result["data"] == [{"id": 1}]
+    assert result["total"] == 1
+    assert result["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_orders_by_dough_trims_large_duplicate_list():
+    payload = [
+        {"id": i, "status": "PAGO", "dataPedido": f"2024-09-{d:02d}T10:00:00"}
+        for i, d in enumerate(range(1, 25), start=1)
+    ]
+    payload.append(
+        {"id": 1, "status": "PAGO", "dataPedido": "2024-09-01T10:00:00"}
+    )
+    client = _client(_resp(200, payload))
+    with patch("app.tools.registry.get_http_client", return_value=client):
+        result = await execute_tool(
+            "get_orders_by_dough",
+            {"dough_id": 2},
+            "http://x",
+            "tok",
+        )
+    assert result["returned"] == 10
+    assert result["truncated"] is True
+    assert result["total"] == 24  # 24 unicos + 1 duplicata do id 1
+    assert len(result["data"]) == 10
 
 
 @pytest.mark.asyncio
 async def test_get_cake_order_details_404_returns_error_message():
     resumo = _resp(404)
-    detalhe = _resp(404)
     client = MagicMock()
-    client.get = AsyncMock(side_effect=[resumo, detalhe])
+    client.get = AsyncMock(return_value=resumo)
 
     with patch("app.tools.registry.get_http_client", return_value=client):
         result = await execute_tool(
@@ -129,6 +156,7 @@ async def test_get_cake_order_details_404_returns_error_message():
         )
     assert "error" in result
     assert "999" in result["error"]
+    assert client.get.call_count == 1
 
 
 @pytest.mark.asyncio

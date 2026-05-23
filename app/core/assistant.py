@@ -6,6 +6,7 @@ import re
 import google.genai as genai
 
 from app.config import settings
+from app.core.api_key_manager import api_key_manager
 from app.core.gemini import get_client
 from app.core.model_manager import model_manager
 from app.core.prompts import SYSTEM_PROMPT, INSIGHTS_PROMPT
@@ -21,11 +22,19 @@ MAX_TOOL_ROUNDS_WRITE = 8
 # Alias kept for backwards compat with existing tests/imports.
 MAX_TOOL_ROUNDS = MAX_TOOL_ROUNDS_READ
 
-MAX_FALLBACK_ATTEMPTS = 3
+def _max_fallback_attempts() -> int:
+    key_count = max(1, len(settings.gemini_api_keys_list))
+    model_count = max(1, len(model_manager._models))
+    return max(9, key_count * model_count)
 
 _RETRY_DELAY_RE = re.compile(r"retryDelay.*?(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
 
-_WRITE_TOOL_PREFIXES = ("create_", "add_", "update_", "delete_")
+_WRITE_TOOL_PREFIXES = ("create_", "add_", "close_", "replace_", "update_", "delete_")
+
+
+def _is_invalid_api_key_error(exc: genai.errors.APIError) -> bool:
+    msg = (getattr(exc, "message", None) or str(exc)).lower()
+    return exc.code in (400, 401, 403) and "api key" in msg
 
 
 def _is_write_tool(name: str) -> bool:
@@ -34,6 +43,13 @@ def _is_write_tool(name: str) -> bool:
     if name in actions.ACTION_TOOL_NAMES and name != "generate_whatsapp_message":
         return True
     return name.startswith(_WRITE_TOOL_PREFIXES)
+
+
+_EMPTY_RESPONSE_NUDGE = (
+    "A resposta anterior veio vazia. Use as ferramentas do sistema para buscar "
+    "dados reais (ex.: get_orders_by_dough, get_order_summaries, get_doughs_catalog) "
+    "e responda em texto claro, sem Markdown."
+)
 
 
 class RateLimitError(RuntimeError):
@@ -64,15 +80,137 @@ class CarambolosAssistant:
             )
         return contents
 
-    async def _generate_with_fallback(self, contents, config) -> tuple:
-        """Try generating content, falling back to other models on 429/404."""
-        model = model_manager.get_model()
-        last_exc = None
+    @staticmethod
+    def _extract_text_from_response(response) -> str:
+        """Texto final do usuario (ignora partes 'thought' do Gemini 2.5)."""
+        sdk_text = getattr(response, "text", None)
+        if isinstance(sdk_text, str) and sdk_text.strip():
+            return sdk_text.strip()
 
-        for attempt in range(MAX_FALLBACK_ATTEMPTS):
+        if not response.candidates:
+            return ""
+        content = response.candidates[0].content
+        if not content or not content.parts:
+            return ""
+
+        chunks: list[str] = []
+        for part in content.parts:
+            if getattr(part, "thought", False) is True:
+                continue
+            if isinstance(part.text, str) and part.text:
+                chunks.append(part.text)
+        return "\n".join(chunks).strip()
+
+    @staticmethod
+    def _function_call_parts(response) -> list:
+        if not response.candidates:
+            return []
+        content = response.candidates[0].content
+        if not content or not content.parts:
+            return []
+        return [
+            part
+            for part in content.parts
+            if part.function_call is not None
+        ]
+
+    @staticmethod
+    def _log_empty_gemini_response(response, phase: str) -> None:
+        finish = None
+        if response.candidates:
+            finish = getattr(response.candidates[0], "finish_reason", None)
+        logger.warning(
+            "Gemini sem texto nem tools (%s): finish_reason=%s",
+            phase,
+            finish,
+        )
+
+    async def _run_tool_rounds(
+        self,
+        response,
+        contents: list,
+        config,
+        tools_used: list[str],
+        pending_confirmation: dict | None,
+        max_rounds: int,
+    ) -> tuple:
+        round_idx = 0
+        while round_idx < max_rounds:
+            function_calls = self._function_call_parts(response)
+            if not function_calls:
+                break
+
+            function_responses = []
+            for fc in function_calls:
+                tool_name = fc.function_call.name
+                tool_args = (
+                    dict(fc.function_call.args) if fc.function_call.args else {}
+                )
+                tools_used.append(tool_name)
+
+                if _is_write_tool(tool_name) and max_rounds == MAX_TOOL_ROUNDS_READ:
+                    max_rounds = MAX_TOOL_ROUNDS_WRITE
+
+                logger.info(
+                    "Chamando tool: %s (args_keys=%s)",
+                    tool_name,
+                    sorted(tool_args.keys()),
+                )
+                result = await execute_tool(
+                    tool_name, tool_args, self.backend_url, self.auth_token
+                )
+                llm_result = result
+                if isinstance(result, dict):
+                    from app.core.confirmation_ux import tool_result_for_llm
+
+                    llm_result = tool_result_for_llm(result)
+                if isinstance(result, dict) and result.get("requires_confirmation"):
+                    payload = result.get("payload") or {}
+                    if not payload and result.get("order_id") is not None:
+                        payload = {"order_id": result["order_id"]}
+                    pending_confirmation = {
+                        "action": result.get("action") or tool_name,
+                        "confirm_token": result.get("confirm_token", ""),
+                        "payload": payload,
+                        "message": result.get("message") or "",
+                    }
+
+                function_responses.append(
+                    genai.types.Part.from_function_response(
+                        name=tool_name, response={"result": llm_result}
+                    )
+                )
+
+            if not response.candidates or not response.candidates[0].content:
+                break
+            contents.append(response.candidates[0].content)
+            contents.append(
+                genai.types.Content(role="user", parts=function_responses)
+            )
+
+            response, _ = await self._generate_with_fallback(contents, config)
+            round_idx += 1
+
+        return response, contents, tools_used, pending_confirmation, max_rounds
+
+    async def _generate_with_fallback(self, contents, config) -> tuple:
+        """Try generating content; fallback models, then API keys on 429/503."""
+        key_idx = api_key_manager.get_key_index()
+        model = model_manager.get_model()
+        client = get_client(key_idx)
+        models_tried_on_key: set[str] = set()
+        last_exc = None
+        max_attempts = _max_fallback_attempts()
+
+        for attempt in range(max_attempts):
             try:
-                logger.info("Usando modelo: %s (tentativa %d)", model, attempt + 1)
-                response = await self.client.aio.models.generate_content(
+                logger.info(
+                    "Gemini key #%d, modelo %s (tentativa %d)",
+                    key_idx + 1,
+                    model,
+                    attempt + 1,
+                )
+                response = await client.aio.models.generate_content(
                     model=model,
                     contents=contents,
                     config=config,
@@ -82,25 +220,64 @@ class CarambolosAssistant:
                 last_exc = exc
 
                 if exc.code in (429, 503):
-                    # 503 "high demand" is transient; rotate models like quota exhaustion.
                     retry_after = _extract_retry_seconds(exc)
-                    fallback = model_manager.mark_rate_limited(model, retry_after)
+                    models_tried_on_key.add(model)
+                    fallback_model = model_manager.mark_rate_limited(
+                        model, retry_after
+                    )
+                    if (
+                        fallback_model is not None
+                        and fallback_model not in models_tried_on_key
+                    ):
+                        model = fallback_model
+                        continue
+
+                    next_key = api_key_manager.mark_rate_limited(
+                        key_idx, retry_after
+                    )
+                    if next_key is not None:
+                        key_idx = next_key
+                        client = get_client(key_idx)
+                        model = model_manager.get_model()
+                        models_tried_on_key = set()
+                        continue
+
+                    raise RateLimitError(
+                        "Todas as chaves e modelos estao temporariamente indisponiveis. "
+                        "Aguarde um momento e tente novamente."
+                    ) from exc
                 elif exc.code == 404:
                     logger.warning("Modelo %s nao encontrado, pulando...", model)
                     fallback = model_manager.mark_rate_limited(model, 3600)
+                    if fallback is None:
+                        raise RateLimitError(
+                            "Todos os modelos estao temporariamente indisponiveis. "
+                            "Aguarde um momento e tente novamente."
+                        ) from exc
+                    model = fallback
+                    continue
+                elif _is_invalid_api_key_error(exc):
+                    logger.warning(
+                        "API key #%d invalida, tentando proxima chave...",
+                        key_idx + 1,
+                    )
+                    next_key = api_key_manager.mark_rate_limited(key_idx, 3600)
+                    if next_key is None:
+                        raise RuntimeError(
+                            "Nenhuma API key Gemini valida configurada. "
+                            "Revise GEMINI_API_KEYS no .env do ai-service."
+                        ) from exc
+                    key_idx = next_key
+                    client = get_client(key_idx)
+                    model = model_manager.get_model()
+                    continue
                 else:
-                    raise RuntimeError(f"Falha na comunicacao com a IA: {exc.message}") from exc
-
-                if fallback is None:
-                    raise RateLimitError(
-                        "Todos os modelos estao temporariamente indisponiveis. "
-                        "Aguarde um momento e tente novamente."
+                    raise RuntimeError(
+                        f"Falha na comunicacao com a IA: {exc.message}"
                     ) from exc
 
-                model = fallback
-
         raise RateLimitError(
-            "Todos os modelos estao temporariamente indisponiveis. "
+            "Todas as chaves e modelos estao temporariamente indisponiveis. "
             "Aguarde um momento e tente novamente."
         ) from last_exc
 
@@ -135,8 +312,9 @@ class CarambolosAssistant:
                 "obtidos e aparecem como function_response na conversa. "
                 "Produza somente texto final para o usuario. E proibido chamar "
                 "ferramentas. Se houver campo error no JSON, explique de forma "
-                "clara. Se houver requires_confirmation=true, peca confirmacao "
-                "e NUNCA diga que executou. NAO use Markdown."
+                "clara. Se houver requires_confirmation=true, repita o campo "
+                "message ao usuario e NUNCA diga que executou. Sem jargao "
+                "tecnico. NAO use Markdown."
             ),
         )
         try:
@@ -147,14 +325,7 @@ class CarambolosAssistant:
             logger.warning("Recuperacao pos-tools falhou: %s", exc)
             return ""
 
-        if not response.candidates or not response.candidates[0].content.parts:
-            return ""
-        text_parts = [
-            part.text
-            for part in response.candidates[0].content.parts
-            if getattr(part, "text", None)
-        ]
-        return "\n".join(text_parts).strip()
+        return self._extract_text_from_response(response)
 
     async def ask(self, question: str, history: list[dict] | None = None) -> dict:
         tools_used: list[str] = []
@@ -175,81 +346,47 @@ class CarambolosAssistant:
         )
 
         response, model = await self._generate_with_fallback(contents, config)
-
-        round_idx = 0
-        while round_idx < max_rounds:
-            if not response.candidates or not response.candidates[0].content.parts:
-                break
-
-            function_calls = [
-                part
-                for part in response.candidates[0].content.parts
-                if part.function_call
-            ]
-
-            if not function_calls:
-                break
-
-            function_responses = []
-            for fc in function_calls:
-                tool_name = fc.function_call.name
-                tool_args = dict(fc.function_call.args) if fc.function_call.args else {}
-                tools_used.append(tool_name)
-
-                # Promote the round budget the first time a write tool
-                # shows up in this turn (chains may need 6-8 rounds).
-                if _is_write_tool(tool_name) and max_rounds == MAX_TOOL_ROUNDS_READ:
-                    max_rounds = MAX_TOOL_ROUNDS_WRITE
-
-                # PII guard: log argument keys only, never their values
-                # (args may carry phone, address, observacao, ...).
-                logger.info(
-                    "Chamando tool: %s (args_keys=%s)",
-                    tool_name,
-                    sorted(tool_args.keys()),
-                )
-                result = await execute_tool(
-                    tool_name, tool_args, self.backend_url, self.auth_token
-                )
-                if isinstance(result, dict) and result.get("requires_confirmation"):
-                    pending_confirmation = {
-                        "action": result.get("action") or tool_name,
-                        "confirm_token": result.get("confirm_token", ""),
-                        "payload": result.get("payload") or {},
-                        "message": result.get("message") or "",
-                    }
-
-                function_responses.append(
-                    genai.types.Part.from_function_response(
-                        name=tool_name, response={"result": result}
-                    )
-                )
-
-            contents.append(response.candidates[0].content)
-            contents.append(
-                genai.types.Content(role="user", parts=function_responses)
+        response, contents, tools_used, pending_confirmation, max_rounds = (
+            await self._run_tool_rounds(
+                response,
+                contents,
+                config,
+                tools_used,
+                pending_confirmation,
+                max_rounds,
             )
+        )
 
+        answer = self._extract_text_from_response(response)
+
+        if not answer and not tools_used:
+            self._log_empty_gemini_response(response, "primeira_passagem")
+            contents.append(
+                genai.types.Content(
+                    role="user",
+                    parts=[genai.types.Part.from_text(text=_EMPTY_RESPONSE_NUDGE)],
+                )
+            )
             response, model = await self._generate_with_fallback(contents, config)
-            round_idx += 1
-
-        if not response.candidates or not response.candidates[0].content.parts:
-            answer = self._fallback_answer(tools_used)
-            return {
-                "answer": answer,
-                "tools_used": tools_used,
-                "pending_confirmation": pending_confirmation,
-            }
-
-        text_parts = [
-            part.text
-            for part in response.candidates[0].content.parts
-            if getattr(part, "text", None)
-        ]
-        answer = "\n".join(text_parts).strip()
+            response, contents, tools_used, pending_confirmation, max_rounds = (
+                await self._run_tool_rounds(
+                    response,
+                    contents,
+                    config,
+                    tools_used,
+                    pending_confirmation,
+                    max_rounds,
+                )
+            )
+            answer = self._extract_text_from_response(response)
 
         if not answer and tools_used:
             answer = await self._recover_text_after_tools(contents)
+
+        if pending_confirmation and pending_confirmation.get("message"):
+            answer = pending_confirmation["message"]
+        elif not answer and any(_is_write_tool(t) for t in tools_used):
+            answer = self._fallback_answer(tools_used)
 
         if not answer:
             answer = self._fallback_answer(tools_used)
@@ -278,6 +415,32 @@ class CarambolosAssistant:
                 "nao veio na primeira tentativa. Envie de novo a mesma pergunta "
                 "ou tente em uma linha: "
                 "'Quem sao os 5 clientes que mais aparecem nos pedidos recentes?'"
+            )
+        if "get_orders_by_dough" in tools_used:
+            return (
+                "Consultei pedidos por massa no sistema, mas a resposta em texto "
+                "nao veio. Envie de novo: 'Quais pedidos usam a massa com id 2?'"
+            )
+        if "get_active_batch_with_products" in tools_used:
+            return (
+                "Consultei a fornada ativa e os produtos no sistema, mas o texto nao veio. "
+                "Tente de novo: 'Mostra a fornada ativa e os produtos'."
+            )
+        if "get_active_batches" in tools_used or "get_products_in_batch" in tools_used:
+            return (
+                "Consultei fornadas no sistema, mas a resposta em texto nao veio. "
+                "Pergunte: 'Mostra a fornada ativa e os produtos'."
+            )
+        write_hits = [
+            t
+            for t in tools_used
+            if _is_write_tool(t)
+        ]
+        if write_hits:
+            return (
+                "Processei sua solicitacao no sistema, mas a resposta em texto nao veio. "
+                "Se apareceu uma previa com Confirmar acima, use o botao ou diga sim. "
+                "Se ja existe fornada ativa, diga se quer substituir ou encerrar a atual."
             )
         return "Nao foi possivel gerar uma resposta no momento. Tente reformular a pergunta."
 
