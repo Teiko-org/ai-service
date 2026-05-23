@@ -209,9 +209,12 @@ async def test_ask_raises_rate_limit_when_all_exhausted():
 
     with _patch_apierror(), \
          patch("app.core.assistant.get_client") as mock_client_factory, \
-         patch("app.core.assistant.model_manager") as mock_mm:
+         patch("app.core.assistant.model_manager") as mock_mm, \
+         patch("app.core.assistant.api_key_manager") as mock_km:
         mock_mm.get_model.return_value = "model-a"
-        mock_mm.mark_rate_limited.return_value = None
+        mock_mm.mark_rate_limited.side_effect = ["model-b", "model-a", None]
+        mock_km.get_key_index.return_value = 0
+        mock_km.mark_rate_limited.return_value = None
 
         mock_client = MagicMock()
         mock_client.aio.models.generate_content = AsyncMock(side_effect=err)
@@ -220,6 +223,41 @@ async def test_ask_raises_rate_limit_when_all_exhausted():
         a = CarambolosAssistant()
         with pytest.raises(RateLimitError):
             await a.ask("oi")
+
+
+@pytest.mark.asyncio
+async def test_ask_fallback_on_429_rotates_api_key_when_models_exhausted():
+    success = _make_response([_text_part("com outra chave")])
+    err_429 = FakeApiError(429, "rate limited")
+
+    client_a = MagicMock()
+    client_a.aio.models.generate_content = AsyncMock(side_effect=err_429)
+    client_b = MagicMock()
+    client_b.aio.models.generate_content = AsyncMock(return_value=success)
+
+    with _patch_apierror(), \
+         patch("app.core.assistant.get_client") as mock_client_factory, \
+         patch("app.core.assistant.model_manager") as mock_mm, \
+         patch("app.core.assistant.api_key_manager") as mock_km:
+        mock_km.get_key_index.return_value = 0
+        mock_mm.get_model.return_value = "model-a"
+        # model-a tried -> model-b tried -> model-a again -> rotate key
+        mock_mm.mark_rate_limited.side_effect = ["model-b", "model-a"]
+        mock_km.mark_rate_limited.return_value = 1
+        mock_mm.get_model.side_effect = ["model-a", "model-a"]
+
+        def _client_for_key(key_index=None):
+            if key_index == 1:
+                return client_b
+            return client_a
+
+        mock_client_factory.side_effect = _client_for_key
+
+        a = CarambolosAssistant()
+        result = await a.ask("oi")
+
+    assert result["answer"] == "com outra chave"
+    mock_km.mark_rate_limited.assert_called_once_with(0, None)
 
 
 # ============================================================
@@ -282,12 +320,15 @@ async def test_ask_other_api_error_raises_runtime():
 
 @pytest.mark.asyncio
 async def test_ask_empty_response_fallback_text():
-    response = MagicMock()
-    response.candidates = []
+    empty = MagicMock()
+    empty.candidates = []
+    empty.text = None
 
     with patch("app.core.assistant.get_client") as mock_client_factory:
         mock_client = MagicMock()
-        mock_client.aio.models.generate_content = AsyncMock(return_value=response)
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=[empty, empty]
+        )
         mock_client_factory.return_value = mock_client
 
         a = CarambolosAssistant()

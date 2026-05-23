@@ -161,7 +161,7 @@ async def test_commit_retirada_full_chain(request_ctx):
 
     assert result["ok"] is True
     assert result["pedido_numero"] == 404
-    assert result["ids"]["resumo_pedido_id"] == 404
+    assert result["ids_internos"]["resumo_pedido_id"] == 404
     assert client.post.await_count == 4
     pedido_call = client._post_calls[2]
     assert pedido_call[1]["horarioRetirada"] == "17:00"

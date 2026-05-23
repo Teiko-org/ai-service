@@ -142,9 +142,10 @@ def test_models_status():
     resp = client.get("/api/v1/models-status")
     assert resp.status_code == 200
     data = resp.json()
-    assert isinstance(data, dict)
-    assert len(data) >= 1
-    for model_name, status in data.items():
+    assert "models" in data
+    assert "api_keys" in data
+    assert len(data["models"]) >= 1
+    for status in (*data["models"].values(), *data["api_keys"].values()):
         assert "available" in status
         assert "cooldown_remaining" in status
 
@@ -449,3 +450,126 @@ def test_ask_confirmation_when_writes_disabled_rejected():
         },
     )
     assert resp.status_code == 400
+
+
+@patch("app.api.routes.execute_tool", new_callable=AsyncMock)
+def test_ask_confirmation_mark_order_allowed_without_writes(mock_execute):
+    mock_execute.return_value = {
+        "ok": True,
+        "order_id": 1,
+        "new_status": "PAGO",
+    }
+
+    resp = client.post(
+        "/api/v1/ask",
+        json={
+            "question": "Confirmo.",
+            "confirmation": {
+                "action": "mark_order_as_paid",
+                "confirm_token": "1779457371.deadbeef" + "0" * 50,
+                "payload": {"order_id": 1},
+            },
+        },
+    )
+    assert resp.status_code == 200
+    assert "PAGO" in resp.json()["answer"]
+    mock_execute.assert_awaited_once()
+
+
+@patch("app.api.routes.execute_tool", new_callable=AsyncMock)
+def test_ask_confirmation_create_pedido_bolo_sets_last_resumo(mock_execute, monkeypatch):
+    from app.config import settings
+    from app.core.sessions import session_store
+
+    monkeypatch.setattr(settings, "enable_write_tools", True)
+    mock_execute.return_value = {
+        "ok": True,
+        "action": "create_pedido_bolo_full",
+        "pedido_numero": 3014,
+        "ids_internos": {"resumo_pedido_id": 3014, "pedido_bolo_id": 221},
+    }
+
+    session_id = "sess-pedido-resumo"
+    session_store.get_or_create(session_id)
+
+    resp = client.post(
+        "/api/v1/ask",
+        json={
+            "question": "Confirmo.",
+            "session_id": session_id,
+            "confirmation": {
+                "action": "create_pedido_bolo_full",
+                "confirm_token": "1779457371.deadbeef" + "0" * 50,
+                "payload": {"nome_cliente": "Ana"},
+            },
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "#3014" in body["answer"]
+    assert "Kanban" in body["answer"]
+    assert session_store.get_last_pedido_resumo_id(session_id) == 3014
+    mock_execute.assert_awaited_once()
+
+
+def test_sim_without_confirm_token_rejected_for_v3_writes(monkeypatch):
+    from app.config import settings
+    from app.core.sessions import session_store
+
+    monkeypatch.setattr(settings, "enable_write_tools", True)
+
+    session_id = "sess-no-token"
+    session_store.get_or_create(session_id)
+    session_store.set_pending_confirmation(
+        session_id,
+        {
+            "action": "create_batch",
+            "confirm_token": "",
+            "payload": {"data_inicio": "2030-01-01", "data_fim": "2030-01-07"},
+        },
+    )
+    resp = client.post(
+        "/api/v1/ask",
+        json={"question": "sim", "session_id": session_id},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "expirou" in body["answer"].lower() or "codigo" in body["answer"].lower()
+    assert session_store.get_pending_confirmation(session_id) is None
+
+
+@patch("app.api.routes.CarambolosAssistant")
+@patch("app.api.routes.execute_tool", new_callable=AsyncMock)
+def test_ask_sim_commits_stored_pending_without_gemini(
+    mock_execute, mock_assistant_cls
+):
+    mock_execute.return_value = {
+        "ok": True,
+        "order_id": 1,
+        "new_status": "PAGO",
+    }
+
+    from app.core.sessions import session_store
+
+    session_id = "sess-sim-commit"
+    session_store.get_or_create(session_id)
+    session_store.set_pending_confirmation(
+        session_id,
+        {
+            "action": "mark_order_as_paid",
+            "confirm_token": "1779457371.deadbeef" + "0" * 50,
+            "payload": {"order_id": 1},
+            "message": "Confirma?",
+        },
+    )
+
+    resp = client.post(
+        "/api/v1/ask",
+        json={"question": "sim", "session_id": session_id},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "PAGO" in data["answer"]
+    assert data["pending_confirmation"] is None
+    mock_assistant_cls.assert_not_called()
+    mock_execute.assert_awaited_once()

@@ -75,12 +75,12 @@ def test_verify_rejects_replay_after_consume():
 
 
 def test_verify_rejects_empty_token():
-    with pytest.raises(ConfirmTokenError, match="Faltou"):
+    with pytest.raises(ConfirmTokenError, match="Aguardando"):
         verify_and_consume("", "create_batch", {}, "sess-1")
 
 
 def test_verify_rejects_malformed_token():
-    with pytest.raises(ConfirmTokenError, match="invalido"):
+    with pytest.raises(ConfirmTokenError, match="invalida"):
         verify_and_consume("not-a-token", "create_batch", {}, "sess-1")
 
 

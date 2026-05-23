@@ -17,6 +17,17 @@ from app.tools import (
 
 logger = logging.getLogger(__name__)
 
+# Nomes das tools V3 (writes) — usados para mensagem clara quando ENABLE_WRITE_TOOLS=false.
+_WRITE_TOOL_NAMES = frozenset(
+    {
+        "create_batch",
+        "add_batch_lines",
+        "close_batch",
+        "replace_active_batch",
+        "create_pedido_bolo_full",
+    }
+)
+
 TOOL_DECLARATIONS = (
     dashboard.DECLARATIONS
     + orders.DECLARATIONS
@@ -50,6 +61,15 @@ if settings.enable_write_tools:
     TOOL_DECLARATIONS = TOOL_DECLARATIONS + writes_router.DECLARATIONS
     _EXECUTORS.update(
         {d.name: writes_router.execute for d in writes_router.DECLARATIONS}
+    )
+    logger.info(
+        "V3 write tools ativas: %s",
+        ", ".join(sorted(_WRITE_TOOL_NAMES)),
+    )
+else:
+    logger.info(
+        "V3 write tools desligadas (ENABLE_WRITE_TOOLS=false). "
+        "Pedidos mark_order_* seguem ativos se CONFIRM_TOKEN_SECRET estiver definido."
     )
 
 
@@ -122,6 +142,14 @@ async def execute_tool(
     executor = _EXECUTORS.get(name)
     if not executor:
         logger.warning("Tool nao registrada: %s", name)
+        if name in _WRITE_TOOL_NAMES:
+            return {
+                "error": (
+                    "Criacao de fornada/pedido pela IA esta desligada neste servidor. "
+                    "No arquivo ai-service/.env defina ENABLE_WRITE_TOOLS=true "
+                    "(e mantenha CONFIRM_TOKEN_SECRET), depois reinicie o uvicorn."
+                )
+            }
         return {"error": f"Tool '{name}' nao encontrada"}
 
     client = get_http_client()
@@ -131,5 +159,11 @@ async def execute_tool(
         logger.info("Tool executada: %s", name)
         return sanitize_for_llm(result) if isinstance(result, (dict, list)) else result
     except Exception as exc:
-        logger.error("Erro ao executar tool %s: %s", name, exc)
-        return {"error": f"Falha ao buscar dados: {str(exc)}"}
+        detail = str(exc).strip() or type(exc).__name__
+        logger.error("Erro ao executar tool %s: %s", name, detail, exc_info=True)
+        return {
+            "error": (
+                f"Falha ao consultar o sistema ({detail}). "
+                "Verifique se o backend Java esta no ar e tente de novo."
+            )
+        }

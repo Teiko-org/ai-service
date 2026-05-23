@@ -8,8 +8,14 @@ from app.config import settings
 from app.core.alerts import get_cached_alerts, refresh_alerts_now
 from app.core.assistant import CarambolosAssistant, RateLimitError
 from app.core.cache import cache
-from app.core.request_context import current_history, current_session_id
+from app.core.confirmation_ux import humanize_confirm_error
+from app.core.request_context import (
+    current_history,
+    current_session_id,
+    direct_user_commit,
+)
 from app.core.limiter import limiter
+from app.core.api_key_manager import api_key_manager
 from app.core.model_manager import model_manager
 from app.core.sessions import session_store
 from app.models.schemas import (
@@ -30,10 +36,32 @@ from app.models.schemas import (
 from app.tools.registry import execute_tool
 from app.tools.reports import REPORT_TOOL_NAME, REPORT_ENDPOINT, REPORT_FILENAME
 
-# Allowlist of write actions reachable via the direct commit endpoint
-# (G4 + G13). Anything outside this set is rejected before touching tools.
+# V3 writes (gated by ENABLE_WRITE_TOOLS on direct commit).
 _VALID_WRITE_ACTIONS = frozenset(
-    {"create_batch", "add_batch_lines", "create_pedido_bolo_full"}
+    {
+        "create_batch",
+        "add_batch_lines",
+        "close_batch",
+        "replace_active_batch",
+        "create_pedido_bolo_full",
+    }
+)
+
+# V2 order status changes — always allowed via direct commit / "sim".
+_ORDER_STATUS_ACTIONS = frozenset(
+    {
+        "mark_order_as_paid",
+        "mark_order_as_completed",
+        "mark_order_as_cancelled",
+        "mark_order_as_pending",
+    }
+)
+
+_VALID_COMMIT_ACTIONS = _VALID_WRITE_ACTIONS | _ORDER_STATUS_ACTIONS
+
+_CONFIRM_PHRASE_RE = re.compile(
+    r"^\s*(sim|confirmo|confirmar|confirmo\.|pode|ok|yes|confirm|manda|vai)\s*[.!?]?\s*$",
+    re.IGNORECASE,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,18 +77,66 @@ def _user_requested_report(question: str) -> bool:
     return bool(_REPORT_INTENT_RE.search(question or ""))
 
 
+def _is_confirmation_phrase(question: str) -> bool:
+    return bool(_CONFIRM_PHRASE_RE.match((question or "").strip()))
+
+
 def _format_write_commit_answer(action: str, result: dict) -> str:
     if result.get("error"):
-        return str(result["error"])
+        return humanize_confirm_error(str(result["error"]))
     if action == "create_batch":
+        fid = result.get("fornada_id")
+        if fid is None:
+            data = result.get("data")
+            if isinstance(data, dict):
+                fid = data.get("id")
+        if fid is not None:
+            return f"Fornada #{fid} criada com sucesso."
         return "Fornada criada com sucesso."
     if action == "add_batch_lines":
+        fid = result.get("fornada_id")
+        if fid is not None:
+            return f"Produtos adicionados a fornada #{fid} com sucesso."
         return "Produtos adicionados a fornada com sucesso."
+    if action == "close_batch":
+        ids = result.get("fornada_ids")
+        if isinstance(ids, list) and len(ids) > 1:
+            listed = ", ".join(f"#{i}" for i in ids)
+            return f"Fornadas {listed} encerradas com sucesso."
+        fid = result.get("fornada_id")
+        if fid is None and isinstance(ids, list) and len(ids) == 1:
+            fid = ids[0]
+        if fid is not None:
+            return f"Fornada #{fid} encerrada com sucesso. Ela nao aparece mais como ativa no app."
+        return "Fornada encerrada com sucesso."
+    if action == "replace_active_batch":
+        closed = result.get("closed_fornada_id")
+        new_id = result.get("fornada_id")
+        if new_id is None:
+            data = result.get("data")
+            if isinstance(data, dict):
+                new_id = data.get("id")
+        if closed is not None and new_id is not None:
+            return (
+                f"Fornada #{closed} encerrada e fornada #{new_id} criada com sucesso."
+            )
+        if new_id is not None:
+            return f"Nova fornada #{new_id} criada com sucesso."
+        return "Fornada substituida com sucesso."
     if action == "create_pedido_bolo_full":
         numero = result.get("pedido_numero")
         if numero is not None:
-            return f"Pedido #{numero} criado com sucesso."
+            return (
+                f"Pedido #{numero} criado com sucesso. "
+                "Esse e o numero no Kanban e no app."
+            )
         return "Pedido de bolo criado com sucesso."
+    if action in _ORDER_STATUS_ACTIONS and result.get("ok"):
+        oid = result.get("order_id")
+        status = result.get("new_status", "")
+        if oid is not None:
+            return f"O pedido #{oid} foi marcado como {status} com sucesso."
+        return f"Pedido marcado como {status} com sucesso."
     return "Acao concluida com sucesso."
 
 
@@ -69,17 +145,18 @@ async def _handle_write_confirmation(
     session_id: str,
     history: list[dict],
     bearer_token: str | None,
+    user_confirmation_text: str = "Confirmo.",
 ) -> dict:
-    user_line = "Confirmo a acao pendente."
+    user_line = (user_confirmation_text or "Confirmo.").strip() or "Confirmo."
     history_with = [*history, {"role": "user", "content": user_line}]
     session_token = current_session_id.set(session_id)
     history_token = current_history.set(history_with)
+    commit_token = direct_user_commit.set(True)
     try:
-        args = {
-            **confirmation.payload,
-            "confirmed": True,
-            "confirm_token": confirmation.confirm_token,
-        }
+        args: dict = {**confirmation.payload, "confirmed": True}
+        token = (confirmation.confirm_token or "").strip()
+        if token:
+            args["confirm_token"] = token
         result = await execute_tool(
             confirmation.action,
             args,
@@ -87,14 +164,119 @@ async def _handle_write_confirmation(
             bearer_token,
         )
     finally:
+        direct_user_commit.reset(commit_token)
         current_history.reset(history_token)
         current_session_id.reset(session_token)
+
+    if result.get("ok") and confirmation.action in (
+        "create_batch",
+        "replace_active_batch",
+    ):
+        fid = result.get("fornada_id")
+        data = result.get("data")
+        if fid is None and isinstance(data, dict):
+            fid = data.get("id")
+        if isinstance(fid, int) and fid > 0:
+            session_store.set_last_fornada_id(session_id, fid)
+
+    if result.get("ok") and confirmation.action == "create_pedido_bolo_full":
+        numero = result.get("pedido_numero")
+        if isinstance(numero, int) and numero > 0:
+            session_store.set_last_pedido_resumo_id(session_id, numero)
 
     answer = _format_write_commit_answer(confirmation.action, result)
     return {
         "answer": answer,
         "tools_used": [confirmation.action],
         "pending_confirmation": None,
+        "ok": bool(result.get("ok")),
+    }
+
+
+def _pending_payload(pending: dict) -> dict:
+    payload = dict(pending.get("payload") or {})
+    if pending.get("order_id") is not None and "order_id" not in payload:
+        payload["order_id"] = pending["order_id"]
+    return payload
+
+
+async def _try_commit_stored_pending(
+    question: str,
+    session_id: str,
+    history: list[dict],
+    bearer_token: str | None,
+) -> dict | None:
+    if not _is_confirmation_phrase(question):
+        return None
+    pending = session_store.get_pending_confirmation(session_id)
+    if not pending:
+        return None
+    action = pending.get("action")
+    if not action or action not in _VALID_COMMIT_ACTIONS:
+        return None
+    if action in _VALID_WRITE_ACTIONS and not settings.enable_write_tools:
+        return None
+
+    token = (pending.get("confirm_token") or "").strip()
+    payload = _pending_payload(pending)
+    if token:
+        confirmation = WriteConfirmationCommit(
+            action=action,
+            confirm_token=token,
+            payload=payload,
+        )
+        out = await _handle_write_confirmation(
+            confirmation,
+            session_id,
+            history,
+            bearer_token,
+            user_confirmation_text=question.strip(),
+        )
+        if out.get("ok"):
+            session_store.set_pending_confirmation(session_id, None)
+        return out
+
+    if action in _VALID_WRITE_ACTIONS:
+        # Writes V3 sempre exigem HMAC; sem token, recusar para nao executar
+        # um commit nao validado.
+        logger.warning(
+            "Commit '%s' recusado: pending sem confirm_token (sessao %s).",
+            action,
+            session_id,
+        )
+        session_store.set_pending_confirmation(session_id, None)
+        return {
+            "answer": (
+                "Essa confirmacao expirou ou nao tem o codigo de seguranca. "
+                "Me peca de novo o que deseja fazer que eu mostro a previa outra vez."
+            ),
+            "tools_used": [],
+            "pending_confirmation": None,
+            "ok": False,
+        }
+
+    session_token = current_session_id.set(session_id)
+    history_token = current_history.set(
+        [*history, {"role": "user", "content": question.strip()}]
+    )
+    try:
+        result = await execute_tool(
+            action,
+            {**payload, "confirmed": True},
+            settings.carambolos_api_url,
+            bearer_token,
+        )
+    finally:
+        current_history.reset(history_token)
+        current_session_id.reset(session_token)
+    answer = _format_write_commit_answer(action, result)
+    if result.get("ok"):
+        session_store.set_pending_confirmation(session_id, None)
+    return {
+        "answer": answer,
+        "tools_used": [action],
+        "pending_confirmation": None,
+        "ok": bool(result.get("ok")),
     }
 
 
@@ -112,22 +294,28 @@ async def ask_question(body: AskRequest, request: Request):
     history = session_store.get_history(session.id, limit=10)
 
     if body.confirmation is not None:
-        if not settings.enable_write_tools:
-            raise HTTPException(
-                status_code=400,
-                detail="Confirmacao recebida mas escrita esta desabilitada no servidor.",
-            )
-        if body.confirmation.action not in _VALID_WRITE_ACTIONS:
+        action = body.confirmation.action
+        if action not in _VALID_COMMIT_ACTIONS:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"Acao '{body.confirmation.action}' nao e uma acao de "
-                    "escrita reconhecida."
+                    f"Acao '{action}' nao e uma acao de confirmacao reconhecida."
                 ),
             )
+        if action in _VALID_WRITE_ACTIONS and not settings.enable_write_tools:
+            raise HTTPException(
+                status_code=400,
+                detail="Confirmacao recebida mas escrita V3 esta desabilitada no servidor.",
+            )
         result = await _handle_write_confirmation(
-            body.confirmation, session.id, history, token
+            body.confirmation,
+            session.id,
+            history,
+            token,
+            user_confirmation_text="Confirmo.",
         )
+        if result.get("ok"):
+            session_store.set_pending_confirmation(session.id, None)
         session_store.append(session.id, "user", "Confirmo.")
         session_store.append(session.id, "assistant", result["answer"])
         return AskResponse(
@@ -141,6 +329,20 @@ async def ask_question(body: AskRequest, request: Request):
     question = sanitize_input(body.question)
     check_prompt_injection(question)
     check_content_policy(question)
+
+    fast_commit = await _try_commit_stored_pending(
+        question, session.id, history, token
+    )
+    if fast_commit is not None:
+        session_store.append(session.id, "user", question)
+        session_store.append(session.id, "assistant", fast_commit["answer"])
+        return AskResponse(
+            answer=fast_commit["answer"],
+            tools_used=fast_commit["tools_used"],
+            session_id=session.id,
+            attachments=[],
+            pending_confirmation=None,
+        )
 
     assistant = CarambolosAssistant(auth_token=token)
 
@@ -174,6 +376,10 @@ async def ask_question(body: AskRequest, request: Request):
         current_history.reset(history_token)
         current_session_id.reset(session_token)
 
+    pending = result.get("pending_confirmation")
+    if isinstance(pending, dict) and (pending.get("message") or "").strip():
+        result["answer"] = pending["message"].strip()
+
     session_store.append(session.id, "user", question)
     session_store.append(session.id, "assistant", result["answer"])
 
@@ -200,6 +406,9 @@ async def ask_question(body: AskRequest, request: Request):
     pending = result.get("pending_confirmation")
     pending_model = (
         PendingConfirmation(**pending) if isinstance(pending, dict) else None
+    )
+    session_store.set_pending_confirmation(
+        session.id, pending if isinstance(pending, dict) else None
     )
 
     return AskResponse(
@@ -339,4 +548,7 @@ async def get_suggested_prompts():
 
 @router.get("/models-status")
 async def get_models_status():
-    return model_manager.get_status()
+    return {
+        "models": model_manager.get_status(),
+        "api_keys": api_key_manager.get_status(),
+    }

@@ -141,14 +141,32 @@ O SYSTEM_PROMPT em `app/core/prompts.py` instrui o modelo a SEMPRE seguir esse f
 | get_cake_formats           | GET /bolos/formatos             | —      |
 | get_doughs_catalog         | GET /bolos/massa                | —      |
 | get_fillings_catalog       | GET /bolos/recheio-unitario     | —      |
+| get_exclusive_fillings_catalog | GET /bolos/recheio-exclusivo | —      |
+
+### batches.py extras
+| Tool                              | Endpoint backend                            |
+|-----------------------------------|---------------------------------------------|
+| get_active_batch_with_products    | GET /fornadas + /fornadas/da-vez/produtos/{id} |
 
 ### writes/fornada.py (V3 — escrita, two-step com HMAC)
-Disponivel apenas quando `ENABLE_WRITE_TOOLS=true`. Cada commit valida HMAC do `confirm_token`, anti-replay, mensagem nova do usuario entre preview e commit, throttle por sessao e Bearer obrigatorio.
+Disponivel apenas quando `ENABLE_WRITE_TOOLS=true`. Cada commit valida HMAC do `confirm_token`, anti-replay, mensagem nova do usuario entre preview e commit, throttle por sessao e Bearer obrigatorio (salvo `ALLOW_ANONYMOUS_WRITES=true` em dev local).
 
-| Tool             | Endpoint backend             | Params                                    | Confirmacao? |
-|------------------|------------------------------|-------------------------------------------|--------------|
-| create_batch     | POST /fornadas               | data_inicio, data_fim (yyyy-MM-dd)        | sim (HMAC)   |
-| add_batch_lines  | POST /fornadas/da-vez (loop) | fornada_id, lines[{produto_fornada_id,quantidade}] | sim (HMAC)   |
+| Tool                  | Endpoint backend                | Params                                                | Confirmacao? |
+|-----------------------|---------------------------------|-------------------------------------------------------|--------------|
+| create_batch          | POST /fornadas                  | data_inicio, data_fim (yyyy-MM-dd ou dd/MM/yyyy)      | sim (HMAC)   |
+| add_batch_lines       | POST /fornadas/da-vez (loop)    | fornada_id?, lines[{produto_nome ou produto_fornada_id, quantidade}] | sim (HMAC)   |
+| close_batch           | DELETE /fornadas/{id}           | fornada_ids[] (1..20)                                 | sim (HMAC)   |
+| replace_active_batch  | DELETE ativa + POST nova        | data_inicio, data_fim                                 | sim (HMAC)   |
+
+Helpers compartilhados em `writes/`:
+
+- `_helpers.py` — auth, throttle, HMAC issue/verify, idempotency, post/get/delete sanitizados (logam payload completo, devolvem mensagem curta).
+- `schema_shared.py` — `confirmed_param`, `confirm_token_param` para FunctionDeclarations.
+- `dates.py` — `parse_user_date` aceita `yyyy-MM-dd` e `dd/MM/yyyy`.
+- `text_match.py` — `normalize_text`, `match_by_name`, `pick_highest_id` para resolvers.
+- `batch_overlap.py` — `pick_active_batch` (compartilhada com `tools/batches.py`), `find_active_batch`.
+- `product_resolve.py` — nome → `produto_fornada_id` (catalogo /dashboard/produtosCadastrados, tipo=FORNADA).
+- `bolo_catalog_resolve.py` — nome → massa/recheio unitario/recheio exclusivo + `apply_catalog_names` (preenche IDs + rotulos para a previa).
 
 Validacoes locais antes de tocar o backend:
 

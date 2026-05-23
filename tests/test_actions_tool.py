@@ -4,11 +4,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.config import settings
 from app.tools.actions import (
     ACTION_TOOL_NAMES,
     DECLARATIONS as ACTION_DECLARATIONS,
 )
 from app.tools.registry import TOOL_DECLARATIONS, execute_tool
+
+
+@pytest.fixture(autouse=True)
+def _no_confirm_secret_by_default(monkeypatch):
+    """Isola testes do CONFIRM_TOKEN_SECRET do .env local do desenvolvedor."""
+    monkeypatch.setattr(settings, "confirm_token_secret", "")
 
 
 def test_all_action_tools_registered():
@@ -179,3 +186,39 @@ async def test_preview_handles_404_gracefully():
         )
     assert "error" in result
     assert "999" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_mark_paid_preview_issues_hmac_token(monkeypatch):
+    monkeypatch.setattr(settings, "confirm_token_secret", "test-secret-only-for-tests")
+    preview = {"id": 1, "valor": 100.0, "dataEntrega": "2024-09-20"}
+    client = _make_client(get_resp=_resp(200, preview))
+
+    with patch("app.tools.registry.get_http_client", return_value=client):
+        result = await execute_tool(
+            "mark_order_as_paid", {"order_id": 1}, "http://x", "tok"
+        )
+
+    assert result["requires_confirmation"] is True
+    assert result["confirm_token"]
+    assert "." in result["confirm_token"]
+    assert result["payload"] == {"order_id": 1}
+    assert "Confirma" in result["message"]
+    assert "R$" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_mark_paid_commit_requires_token_when_secret_set(monkeypatch):
+    monkeypatch.setattr(settings, "confirm_token_secret", "test-secret-only-for-tests")
+    client = _make_client(patch_resp=_resp(200, {"id": 1, "status": "PAGO"}))
+
+    with patch("app.tools.registry.get_http_client", return_value=client):
+        result = await execute_tool(
+            "mark_order_as_paid",
+            {"order_id": 1, "confirmed": True},
+            "http://x",
+            "tok",
+        )
+
+    assert "error" in result
+    assert "confirmacao" in result["error"].lower()

@@ -31,19 +31,21 @@ Este servico NAO acessa o banco diretamente. Toda leitura de dados passa pelas t
 | POST   | /api/v1/insights           | 10/min      | Bearer  | Insights proativos (com cache 5min)                |
 | GET    | /api/v1/alerts             | 30/min      | Bearer  | Alertas proativos (cache 30min, refresh em bg)     |
 | GET    | /api/v1/suggested-prompts  | 60/min      | Nao     | Prompts pre-definidos (pills)                      |
-| GET    | /api/v1/models-status      | 60/min      | Nao     | Status/cooldown dos modelos Gemini                 |
+| GET    | /api/v1/models-status      | 60/min      | Nao     | Cooldown de modelos e API keys (`models`, `api_keys`) |
 
 ## Configuracao
 
 Tudo via `.env` / variavel de ambiente. Validado por `pydantic-settings` em `app/config.py`:
-- `GEMINI_API_KEY` (obrigatorio) — Chave do Google AI Studio
+- `GEMINI_API_KEY` ou `GEMINI_API_KEYS` (virgula, ex. 3 chaves) — Google AI Studio; rotacao em 429/503
 - `GEMINI_MODEL` — Modelo Gemini principal (default: `gemini-2.5-flash-lite`)
 - `CARAMBOLOS_API_URL` — URL do backend Java (default: `http://localhost:8080`)
 - `ALLOWED_ORIGINS` — CORS origins separados por virgula
 - `LOG_LEVEL` — DEBUG, INFO, WARNING, ERROR
 - `ENABLE_WRITE_TOOLS` — `true` carrega tools de escrita no registry (default: `false`)
-- `CONFIRM_TOKEN_SECRET` — Obrigatorio se writes ligadas; segredo HMAC do preview-token
+- `CONFIRM_TOKEN_SECRET` — Obrigatorio se writes ligadas; segredo HMAC do preview-token (use 24+ chars; <24 dispara warning no startup)
 - `CONFIRM_TOKEN_TTL_SECONDS` — TTL do token (default: `120`)
+- `ALLOW_ANONYMOUS_WRITES` — `true` so em dev local (app sem JWT); em `ENVIRONMENT=production` o startup falha
+- `ENVIRONMENT` — `development` | `staging` | `production` (controla o guard acima)
 
 Modelos de fallback definidos em `FALLBACK_MODELS` no `config.py`:
 - `gemini-2.5-flash-lite` (principal — 15 RPM, 1.000 RPD)
@@ -108,8 +110,16 @@ Ativas so com `ENABLE_WRITE_TOOLS=true`. Tools em `app/tools/writes/`:
 | Tool | Efeito |
 |------|--------|
 | `create_batch` | `POST /fornadas` |
-| `add_batch_lines` | `POST /fornadas/da-vez` (lote) |
-| `create_pedido_bolo_full` | Cadeia recheio → bolo → pedido → resumo (+ endereco se ENTREGA) |
+| `add_batch_lines` | `POST /fornadas/da-vez` (lote, aceita `produto_nome`) |
+| `close_batch` | Encerra uma ou varias fornadas (`fornada_ids`) |
+| `replace_active_batch` | Encerra ativa + cria nova em uma confirmacao |
+| `create_pedido_bolo_full` | Cadeia recheio → bolo → pedido → resumo (+ endereco se ENTREGA); aceita `massa_nome`, `recheio_nome`, `recheio_exclusivo_nome` |
+
+**Glossario de IDs de pedido (V3):**
+
+- `pedido_numero` (resposta de `create_pedido_bolo_full` e de `get_cake_order_details`) = id do resumo = **Pedido #X** no Kanban/app. Unico numero que aparece para o usuario.
+- `ids_internos.pedido_bolo_id` / `numeroPedido` no JSON do Java = ids de entidades internas. Nunca citar ao usuario.
+- O assistente armazena `last_pedido_resumo_id` na sessao apos commit, permitindo "detalhes do pedido que criamos".
 
 Fluxo two-step (todas as writes):
 
@@ -120,6 +130,17 @@ Fluxo two-step (todas as writes):
 Guardrails: auth obrigatorio no commit, throttle por sessao+tool, validacao local, `sanitize_for_llm` nas leituras, rollback best-effort na cadeia de bolo.
 
 Ver `app/tools/AGENTS.md` (secao `writes/`).
+
+## Politica de idioma (prompts e descriptions)
+
+Centralizada em `app/core/prompt_contracts.py`. Resumo:
+
+- Respostas ao usuario, `SYSTEM_PROMPT`, previas de write e `instruction` em tool results: **PT-BR**, persona unica **Kuroko**, sem acentos.
+- Nomes de tools / parametros: **EN snake_case** (estavel, acoplado a testes e backend).
+- `FunctionDeclaration.description`: **PT-BR**, formato curto "o que faz + quando usar".
+- `INSIGHTS_PROMPT`: chaves JSON em **EN** (contrato com o parser/UI).
+
+Piloto de descriptions em EN em tools read-only fica fora do ciclo V3 — abrir como experimento separado, com roteiro `scripts/ROTEIRO_KUROKO_ASSISTANTE.md` rodado antes e depois para medir regressao.
 
 ## Anti-patterns
 

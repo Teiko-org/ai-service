@@ -1,10 +1,10 @@
-"""Write tool for full cake order creation (V3 phase 2).
+"""Tool de escrita V3: cria pedido de bolo completo em uma confirmacao.
 
-Single tool `create_pedido_bolo_full` runs the backend chain in one commit:
+Cadeia no commit:
   POST /bolos/recheio-pedido -> POST /bolos -> POST /bolos/pedido -> POST /resumo-pedido
-Optional: POST /enderecos when tipo_entrega=ENTREGA and `endereco` is provided.
+Opcional: POST /enderecos quando tipo_entrega=ENTREGA com objeto `endereco`.
 
-On failure after partial creation, best-effort DELETE runs in reverse order.
+Falha apos passo parcial -> DELETE reverso best-effort.
 """
 
 from __future__ import annotations
@@ -20,7 +20,9 @@ import httpx
 from app.tools.writes._helpers import (
     WriteToolError,
     check_throttle,
+    coerce_positive_int,
     delete_best_effort,
+    effective_confirmed,
     get_json,
     issue_preview,
     post_json,
@@ -29,7 +31,14 @@ from app.tools.writes._helpers import (
     run_idempotent_commit,
     verify_commit,
 )
-from app.tools.writes.fornada import _confirm_token_param, _confirmed_param
+from app.core.request_context import current_session_id
+from app.core.sessions import session_store
+from app.tools.writes.bolo_catalog_resolve import apply_catalog_names
+from app.tools.writes.dates import parse_user_date as _parse_user_date
+from app.tools.writes.schema_shared import (
+    confirm_token_param as _confirm_token_param,
+    confirmed_param as _confirmed_param,
+)
 
 WRITE_TOOL_NAMES = {"create_pedido_bolo_full"}
 
@@ -57,8 +66,8 @@ DECLARATIONS = [
             "destrutiva: SEMPRE chame primeiro com confirmed=False, mostre a "
             "previa e SO confirme com confirmed=True + confirm_token apos "
             "resposta explicita do usuario em NOVA mensagem. Antes de chamar, "
-            "use tools de catalogo (get_doughs_catalog, get_fillings_catalog, "
-            "get_decorations, get_cake_sizes, get_cake_formats) para obter IDs."
+            "use tools de catalogo OU informe massa_nome / recheio_nome / "
+            "recheio_exclusivo_nome (o servidor resolve o id)."
         ),
         parameters=genai.types.Schema(
             type=genai.types.Type.OBJECT,
@@ -66,6 +75,13 @@ DECLARATIONS = [
                 "massa_id": genai.types.Schema(
                     type=genai.types.Type.INTEGER,
                     description="ID da massa (catalogo get_doughs_catalog).",
+                ),
+                "massa_nome": genai.types.Schema(
+                    type=genai.types.Type.STRING,
+                    description=(
+                        "Sabor da massa por nome (ex.: Chocolate). Alternativa "
+                        "a massa_id; nao peca ID ao usuario."
+                    ),
                 ),
                 "cobertura_id": genai.types.Schema(
                     type=genai.types.Type.INTEGER,
@@ -96,6 +112,17 @@ DECLARATIONS = [
                     type=genai.types.Type.INTEGER,
                     description="ID do recheio exclusivo (mutuamente exclusivo com unitarios).",
                 ),
+                "recheio_exclusivo_nome": genai.types.Schema(
+                    type=genai.types.Type.STRING,
+                    description="Nome do recheio exclusivo (alternativa ao id).",
+                ),
+                "recheio_nome": genai.types.Schema(
+                    type=genai.types.Type.STRING,
+                    description=(
+                        "Sabor de recheio unitario unico por nome (alternativa "
+                        "a recheio_unitario_id)."
+                    ),
+                ),
                 "recheio_unitario_id": genai.types.Schema(
                     type=genai.types.Type.INTEGER,
                     description=(
@@ -125,7 +152,7 @@ DECLARATIONS = [
                 ),
                 "data_previsao_entrega": genai.types.Schema(
                     type=genai.types.Type.STRING,
-                    description="Data de entrega yyyy-MM-dd.",
+                    description="Data de entrega (yyyy-MM-dd ou dd/MM/yyyy).",
                 ),
                 "hora_entrega": genai.types.Schema(
                     type=genai.types.Type.STRING,
@@ -167,7 +194,6 @@ DECLARATIONS = [
                 "confirm_token": _confirm_token_param(),
             },
             required=[
-                "massa_id",
                 "formato",
                 "tamanho",
                 "nome_cliente",
@@ -183,14 +209,14 @@ DECLARATIONS = [
 @dataclass
 class _ValidatedOrder:
     massa_id: int
+    massa_label: str
+    recheio_label: str
     cobertura_id: int | None
     decoracao_id: int | None
     formato: str
     tamanho: str
     categoria: str
-    # Canonical recheio fields keep the input shape so the same payload
-    # round-trips: model/app sends it back unchanged on commit and the
-    # HMAC of the canonical args still matches.
+    # Mesma forma de entrada para o payload bater com o HMAC no commit.
     recheio_exclusivo_id: int | None
     recheio_unitario_id: int | None
     recheio_unitario_1: int | None
@@ -215,21 +241,22 @@ class _CreatedIds:
     resumo_id: int | None = None
 
 
-def _positive_int(value: Any, field: str) -> int:
-    if not isinstance(value, int) or value <= 0:
-        raise WriteToolError(f"{field} deve ser um inteiro positivo.")
-    return value
-
-
-def _parse_iso_date(value: Any, field: str) -> date:
-    if not isinstance(value, str):
-        raise WriteToolError(f"{field} deve ser yyyy-MM-dd.")
-    try:
-        return date.fromisoformat(value)
-    except ValueError as exc:
+def _normalize_tamanho(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
         raise WriteToolError(
-            f"{field} invalido: '{value}' nao esta no formato yyyy-MM-dd."
-        ) from exc
+            f"tamanho invalido. Valores: {', '.join(sorted(_TAMANHOS))} ou ex. 12."
+        )
+    raw = value.strip().upper().replace(" ", "_")
+    if raw in _TAMANHOS:
+        return raw
+    digits = re.sub(r"\D", "", raw)
+    if digits:
+        cand = f"TAMANHO_{digits}"
+        if cand in _TAMANHOS:
+            return cand
+    raise WriteToolError(
+        f"tamanho invalido. Valores: {', '.join(sorted(_TAMANHOS))}."
+    )
 
 
 def _parse_hhmm(value: Any, field: str, required: bool = False) -> str | None:
@@ -273,9 +300,9 @@ def _normalize_recheio_fields(
         )
 
     if has_ex:
-        return _positive_int(exclusivo, "recheio_exclusivo_id"), None, None, None
+        return coerce_positive_int(exclusivo, "recheio_exclusivo_id"), None, None, None
     if has_single:
-        return None, _positive_int(unit_single, "recheio_unitario_id"), None, None
+        return None, coerce_positive_int(unit_single, "recheio_unitario_id"), None, None
     if u1 is None or u2 is None:
         raise WriteToolError(
             "recheio_unitario_1 e recheio_unitario_2 devem ser informados juntos."
@@ -283,8 +310,8 @@ def _normalize_recheio_fields(
     return (
         None,
         None,
-        _positive_int(u1, "recheio_unitario_1"),
-        _positive_int(u2, "recheio_unitario_2"),
+        coerce_positive_int(u1, "recheio_unitario_1"),
+        coerce_positive_int(u2, "recheio_unitario_2"),
     )
 
 
@@ -344,26 +371,24 @@ def _endereco_request_body(endereco: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validate_and_canonicalize(args: dict) -> tuple[_ValidatedOrder, dict]:
-    massa_id = _positive_int(args.get("massa_id"), "massa_id")
+    massa_raw = args.get("massa_id")
+    if massa_raw is None:
+        raise WriteToolError("Informe massa_id ou massa_nome.")
+    massa_id = coerce_positive_int(massa_raw, "massa_id")
     cobertura_id = args.get("cobertura_id")
     if cobertura_id is not None:
-        cobertura_id = _positive_int(cobertura_id, "cobertura_id")
+        cobertura_id = coerce_positive_int(cobertura_id, "cobertura_id")
 
     decoracao_id = args.get("decoracao_id")
     if decoracao_id is not None:
-        decoracao_id = _positive_int(decoracao_id, "decoracao_id")
+        decoracao_id = coerce_positive_int(decoracao_id, "decoracao_id")
 
     formato = args.get("formato")
     if not isinstance(formato, str) or formato.upper() not in _FORMATOS:
         raise WriteToolError("formato deve ser CIRCULO ou CORACAO.")
     formato = formato.upper()
 
-    tamanho = args.get("tamanho")
-    if not isinstance(tamanho, str) or tamanho.upper() not in _TAMANHOS:
-        raise WriteToolError(
-            f"tamanho invalido. Valores: {', '.join(sorted(_TAMANHOS))}."
-        )
-    tamanho = tamanho.upper()
+    tamanho = _normalize_tamanho(args.get("tamanho"))
 
     categoria = args.get("categoria") or "PERSONALIZADO"
     if not isinstance(categoria, str) or not categoria.strip():
@@ -384,7 +409,9 @@ def _validate_and_canonicalize(args: dict) -> tuple[_ValidatedOrder, dict]:
         raise WriteToolError("tipo_entrega deve ser RETIRADA ou ENTREGA.")
     tipo = tipo.upper()
 
-    entrega = _parse_iso_date(args.get("data_previsao_entrega"), "data_previsao_entrega")
+    entrega = _parse_user_date(
+        args.get("data_previsao_entrega"), "data_previsao_entrega"
+    )
     today = date.today()
     if entrega < today:
         raise WriteToolError("data_previsao_entrega nao pode estar no passado.")
@@ -406,7 +433,7 @@ def _validate_and_canonicalize(args: dict) -> tuple[_ValidatedOrder, dict]:
 
     endereco_id = args.get("endereco_id")
     if endereco_id is not None:
-        endereco_id = _positive_int(endereco_id, "endereco_id")
+        endereco_id = coerce_positive_int(endereco_id, "endereco_id")
 
     endereco = _normalize_endereco(args.get("endereco"))
 
@@ -441,8 +468,13 @@ def _validate_and_canonicalize(args: dict) -> tuple[_ValidatedOrder, dict]:
         "endereco": endereco,
     }
 
+    massa_label = _massa_display(args, massa_id)
+    recheio_label = _recheio_display(args, rex, runi, ru1, ru2)
+
     validated = _ValidatedOrder(
         massa_id=massa_id,
+        massa_label=massa_label,
+        recheio_label=recheio_label,
         cobertura_id=cobertura_id,
         decoracao_id=decoracao_id,
         formato=formato,
@@ -465,6 +497,59 @@ def _validate_and_canonicalize(args: dict) -> tuple[_ValidatedOrder, dict]:
     return validated, canonical
 
 
+def _label_from_catalog(args: dict, key: str, fallback: str) -> str:
+    labels = args.get("_catalog_labels")
+    if isinstance(labels, dict):
+        text = labels.get(key)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return fallback
+
+
+def _massa_display(args: dict, massa_id: int) -> str:
+    nome = args.get("massa_nome")
+    if isinstance(nome, str) and nome.strip():
+        return nome.strip()
+    return _label_from_catalog(args, "massa", f"massa #{massa_id}")
+
+
+def _recheio_display(
+    args: dict,
+    rex: int | None,
+    runi: int | None,
+    ru1: int | None,
+    ru2: int | None,
+) -> str:
+    for key in ("recheio_exclusivo_nome", "recheio_nome"):
+        text = args.get(key)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    labeled = _label_from_catalog(args, "recheio", "")
+    if labeled:
+        return labeled
+    if rex is not None:
+        return f"exclusivo #{rex}"
+    if runi is not None:
+        return f"unitario #{runi}"
+    if ru1 is not None and ru2 is not None:
+        return f"dois sabores (#{ru1} + #{ru2})"
+    return "recheio"
+
+
+def _format_tamanho(tamanho: str) -> str:
+    if tamanho.startswith("TAMANHO_"):
+        return f"{tamanho.replace('TAMANHO_', '')}cm"
+    return tamanho
+
+
+def _format_formato(formato: str) -> str:
+    if formato == "CIRCULO":
+        return "circulo"
+    if formato == "CORACAO":
+        return "coracao"
+    return formato.lower()
+
+
 def _preview_message(v: _ValidatedOrder) -> str:
     entrega_txt = (
         f"retirada as {v.horario_retirada}"
@@ -473,9 +558,10 @@ def _preview_message(v: _ValidatedOrder) -> str:
     )
     deco = f", decoracao #{v.decoracao_id}" if v.decoracao_id else ""
     return (
-        f"Vou criar pedido de bolo para {v.nome_cliente} ({v.tamanho}, "
-        f"{v.formato}{deco}), {entrega_txt} em {v.data_previsao_entrega}. "
-        "Confirma?"
+        f"Vou criar pedido de bolo para {v.nome_cliente}: massa {v.massa_label}, "
+        f"recheio {v.recheio_label}, {_format_formato(v.formato)} "
+        f"{_format_tamanho(v.tamanho)}{deco}, {entrega_txt} em "
+        f"{v.data_previsao_entrega}. Confirma?"
     )
 
 
@@ -616,11 +702,20 @@ async def _execute_chain(
             raise WriteToolError("Backend nao retornou id do resumo de pedido.")
         created.resumo_id = resumo_id
 
+        sid = current_session_id.get()
+        if sid and resumo_id > 0:
+            session_store.set_last_pedido_resumo_id(sid, resumo_id)
+
         return {
             "ok": True,
             "action": "create_pedido_bolo_full",
             "pedido_numero": resumo_id,
-            "ids": {
+            "instruction": (
+                "Cite ao usuario apenas pedido_numero (mesmo numero do Kanban/app). "
+                "Para get_cake_order_details ou get_order_summary_by_id use "
+                f"order_id={resumo_id}. Nao use pedido_bolo_id nem outros ids internos."
+            ),
+            "ids_internos": {
                 "recheio_pedido_id": recheio_id,
                 "bolo_id": bolo_id,
                 "pedido_bolo_id": pedido_id,
@@ -640,8 +735,9 @@ async def _execute_chain(
 async def _execute_create_pedido_bolo_full(
     args: dict, base_url: str, token: str | None, client: httpx.AsyncClient
 ) -> dict:
-    validated, canonical = _validate_and_canonicalize(args)
-    confirmed = bool(args.get("confirmed", False))
+    resolved = await apply_catalog_names(args, client, base_url, token)
+    validated, canonical = _validate_and_canonicalize(resolved)
+    confirmed = effective_confirmed(args)
 
     if not confirmed:
         confirm_token = issue_preview("create_pedido_bolo_full", canonical)

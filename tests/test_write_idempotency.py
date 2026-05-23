@@ -18,6 +18,14 @@ def _clear_cache():
     cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _mock_active_batch(monkeypatch):
+    monkeypatch.setattr(
+        "app.tools.writes.fornada.find_active_batch",
+        AsyncMock(return_value=None),
+    )
+
+
 @pytest.fixture
 def request_ctx():
     history = [{"role": "user", "content": "criar"}]

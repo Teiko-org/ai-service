@@ -4,10 +4,10 @@ Mapeiam endpoints do ResumoPedidoController que ate entao nao eram usados pelo
 assistente, permitindo respostas mais ricas (massa, recheio, formato, tamanho,
 observacoes), filtros por data de entrega, status, massa e recheio.
 
-O endpoint Java `.../pedido-bolo/detalhe/{id}` espera o ID interno do *pedido de
-bolo*. O usuario costuma citar o *resumo* (mesmo numero do Kanban). Por isso
-esta tool primeiro consulta `GET /resumo-pedido/{id}` e usa `pedidoBoloId` quando
-existir; se o resumo nao existir, tenta o detalhe com o proprio numero (fallback).
+O usuario cita o *resumo* (Pedido #3014 no Kanban). Esta tool resolve
+`GET /resumo-pedido/{id}` e chama `.../pedido-bolo/detalhe/{pedidoBoloId}`.
+O JSON de detalhe traz `numeroPedido` = id interno do pedido de bolo (ex. 221);
+a resposta enriquecida inclui `pedido_numero` = id do resumo (#3014 no app).
 """
 
 import google.genai as genai
@@ -16,6 +16,70 @@ import httpx
 from app.tools.order_ref import parse_resumo_order_id
 
 _VALID_STATUS = {"PENDENTE", "PAGO", "CONCLUIDO", "CANCELADO"}
+_MAX_ORDERS_FOR_LLM = 10
+
+
+def _enrich_cake_detail_for_llm(detail: dict, pedido_numero_resumo: int) -> dict:
+    """Evita confundir numeroPedido (id interno) com o numero visivel no app."""
+    internal = detail.get("numeroPedido")
+    enriched = dict(detail)
+    enriched["pedido_numero"] = pedido_numero_resumo
+    if internal is not None:
+        enriched["pedido_bolo_id_interno"] = internal
+    enriched["instruction"] = (
+        f"O numero do pedido para o usuario e Pedido #{pedido_numero_resumo} "
+        "(Kanban/app/WhatsApp). O campo numeroPedido na API e id interno do "
+        "pedido de bolo — nao cite esse valor como numero do pedido."
+    )
+    return enriched
+
+
+def _order_sort_key(item: dict) -> str:
+    for field in ("dataPedido", "dataEntrega"):
+        value = item.get(field)
+        if value:
+            return str(value)
+    return ""
+
+
+def _dedupe_orders_by_id(orders: list) -> list:
+    seen: set = set()
+    unique: list = []
+    for item in orders:
+        if not isinstance(item, dict):
+            continue
+        order_id = item.get("id")
+        if order_id in seen:
+            continue
+        seen.add(order_id)
+        unique.append(item)
+    return unique
+
+
+def _trim_orders_for_llm(
+    orders: list, *, limit: int = _MAX_ORDERS_FOR_LLM
+) -> dict:
+    """Dedupe, ordena por data mais recente e limita payload para o Gemini."""
+    if not orders:
+        return {"data": [], "total": 0, "returned": 0, "truncated": False}
+
+    unique = _dedupe_orders_by_id(orders)
+    sorted_orders = sorted(unique, key=_order_sort_key, reverse=True)
+    total = len(sorted_orders)
+    page = sorted_orders[:limit]
+    truncated = total > len(page)
+    result: dict = {
+        "data": page,
+        "total": total,
+        "returned": len(page),
+        "truncated": truncated,
+    }
+    if truncated:
+        result["message"] = (
+            f"Mostrando os {len(page)} pedidos mais recentes "
+            f"(de {total} encontrados no sistema)."
+        )
+    return result
 
 
 def _api_error_message(resp: httpx.Response, default: str) -> str:
@@ -152,7 +216,8 @@ DECLARATIONS = [
         name="get_orders_by_dough",
         description=(
             "Lista pedidos de bolo que usam uma massa especifica (pelo ID da "
-            "massa). Util para 'quais pedidos usam massa de chocolate?'. "
+            "massa). Retorna ate os 10 mais recentes (campo total = quantidade "
+            "no sistema). Util para 'quais pedidos usam massa de chocolate?'. "
             "Antes, descubra o ID com a tool de catalogo se o usuario citar "
             "o nome."
         ),
@@ -176,7 +241,8 @@ DECLARATIONS = [
         name="get_orders_by_filling",
         description=(
             "Lista pedidos de bolo que usam um recheio composto especifico "
-            "(pelo ID do recheio_pedido). Filtra opcionalmente por status."
+            "(pelo ID do recheio_pedido). Retorna ate os 10 mais recentes "
+            "(campo total = quantidade no sistema). Filtra opcionalmente por status."
         ),
         parameters=genai.types.Schema(
             type=genai.types.Type.OBJECT,
@@ -243,7 +309,12 @@ async def execute(
                 }
             detail_bolo_id = int(pedido_bolo_id)
         elif resumo_resp.status_code == 404:
-            detail_bolo_id = int(order_id)
+            return {
+                "error": (
+                    f"Pedido #{order_id} nao encontrado. Use o numero do Kanban "
+                    "(resumo), nao o id interno do pedido de bolo."
+                )
+            }
         else:
             return {
                 "error": _api_error_message(
@@ -272,7 +343,10 @@ async def execute(
                     f"Erro ao buscar detalhes do bolo (HTTP {resp.status_code}).",
                 )
             }
-        return resp.json()
+        body = resp.json()
+        if isinstance(body, dict):
+            return _enrich_cake_detail_for_llm(body, order_id)
+        return body
 
     if name == "get_batch_order_details":
         raw_oid = args.get("order_id")
@@ -339,7 +413,10 @@ async def execute(
         if resp.status_code == 204:
             return {"data": [], "message": f"Nenhum pedido com status {status}."}
         resp.raise_for_status()
-        return {"data": resp.json()}
+        raw = resp.json()
+        if not isinstance(raw, list):
+            raw = []
+        return _trim_orders_for_llm(raw)
 
     if name == "get_orders_by_delivery_date":
         delivery_date = args.get("delivery_date")
@@ -359,7 +436,10 @@ async def execute(
                 "message": f"Nenhum pedido para entrega em {delivery_date}.",
             }
         resp.raise_for_status()
-        return {"data": resp.json()}
+        raw = resp.json()
+        if not isinstance(raw, list):
+            raw = []
+        return _trim_orders_for_llm(raw)
 
     if name == "get_orders_by_dough":
         dough_id = args.get("dough_id")
@@ -376,7 +456,10 @@ async def execute(
         if resp.status_code == 204:
             return {"data": [], "message": "Nenhum pedido encontrado para essa massa."}
         resp.raise_for_status()
-        return {"data": resp.json()}
+        raw = resp.json()
+        if not isinstance(raw, list):
+            raw = []
+        return _trim_orders_for_llm(raw)
 
     if name == "get_orders_by_filling":
         filling_id = args.get("filling_id")
@@ -393,6 +476,9 @@ async def execute(
         if resp.status_code == 204:
             return {"data": [], "message": "Nenhum pedido encontrado para esse recheio."}
         resp.raise_for_status()
-        return {"data": resp.json()}
+        raw = resp.json()
+        if not isinstance(raw, list):
+            raw = []
+        return _trim_orders_for_llm(raw)
 
     return {"error": f"Tool desconhecida: {name}"}
