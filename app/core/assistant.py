@@ -344,7 +344,13 @@ class CarambolosAssistant:
 
         return self._extract_text_from_response(response)
 
-    async def ask(self, question: str, history: list[dict] | None = None) -> dict:
+    async def ask(
+        self,
+        question: str,
+        history: list[dict] | None = None,
+        *,
+        user_parts: list | None = None,
+    ) -> dict:
         tools_used: list[str] = []
         pending_confirmation: dict | None = None
         whatsapp_text: str | None = None
@@ -356,10 +362,14 @@ class CarambolosAssistant:
         )
 
         contents = self._build_history_contents(history or [])
+        if user_parts is not None:
+            parts = user_parts
+        else:
+            parts = [genai.types.Part.from_text(text=question)]
         contents.append(
             genai.types.Content(
                 role="user",
-                parts=[genai.types.Part.from_text(text=question)],
+                parts=parts,
             )
         )
 
@@ -428,6 +438,41 @@ class CarambolosAssistant:
             "tools_used": tools_used,
             "pending_confirmation": pending_confirmation,
         }
+
+    async def transcribe_audio(self, audio_bytes: bytes, mime_type: str) -> str:
+        config = genai.types.GenerateContentConfig(
+            system_instruction=(
+                "Transcreva o audio em portugues brasileiro. "
+                "Retorne somente a transcricao literal, sem aspas ou comentarios."
+            ),
+        )
+        contents = [
+            genai.types.Content(
+                role="user",
+                parts=[
+                    genai.types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
+                ],
+            )
+        ]
+        response, _ = await self._generate_with_fallback(contents, config)
+        return self._extract_text_from_response(response).strip()
+
+    async def ask_audio(
+        self,
+        audio_bytes: bytes,
+        mime_type: str,
+        history: list[dict] | None = None,
+    ) -> dict:
+        user_parts = [
+            genai.types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
+            genai.types.Part.from_text(
+                text=(
+                    "Pergunta do usuario em audio acima. "
+                    "Use as ferramentas do sistema quando necessario e responda em portugues."
+                )
+            ),
+        ]
+        return await self.ask("", history=history, user_parts=user_parts)
 
     @staticmethod
     def _fallback_answer(tools_used: list[str]) -> str:

@@ -575,3 +575,56 @@ def test_ask_sim_commits_stored_pending_without_gemini(
     assert data["pending_confirmation"] is None
     mock_assistant_cls.assert_not_called()
     mock_execute.assert_awaited_once()
+
+
+def test_ask_audio_missing_file_returns_422():
+    resp = client.post("/api/v1/ask/audio")
+    assert resp.status_code == 422
+
+
+@patch("app.api.routes.CarambolosAssistant")
+def test_ask_audio_success(mock_assistant_cls):
+    mock_instance = AsyncMock()
+    mock_instance.transcribe_audio.return_value = "Quantos pedidos hoje?"
+    mock_instance.ask_audio.return_value = {
+        "answer": "Voce tem 12 pedidos hoje.",
+        "tools_used": ["get_orders_summary"],
+    }
+    mock_assistant_cls.return_value = mock_instance
+
+    resp = client.post(
+        "/api/v1/ask/audio",
+        files={"audio": ("question.webm", b"fake-audio-bytes", "audio/webm")},
+        data={"session_id": "audio-session-1"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["transcription"] == "Quantos pedidos hoje?"
+    assert "12 pedidos" in data["answer"]
+    assert data["session_id"] == "audio-session-1"
+    mock_instance.transcribe_audio.assert_awaited_once()
+    mock_instance.ask_audio.assert_awaited_once()
+
+
+@patch("app.api.routes.CarambolosAssistant")
+def test_ask_audio_empty_transcription_returns_400(mock_assistant_cls):
+    mock_instance = AsyncMock()
+    mock_instance.transcribe_audio.return_value = "   "
+    mock_assistant_cls.return_value = mock_instance
+
+    resp = client.post(
+        "/api/v1/ask/audio",
+        files={"audio": ("question.webm", b"fake-audio-bytes", "audio/webm")},
+    )
+    assert resp.status_code == 400
+    assert "entender" in resp.json()["detail"].lower()
+
+
+@patch("app.api.routes.CarambolosAssistant")
+def test_ask_audio_unsupported_mime_returns_400(mock_assistant_cls):
+    resp = client.post(
+        "/api/v1/ask/audio",
+        files={"audio": ("question.txt", b"not-audio", "text/plain")},
+    )
+    assert resp.status_code == 400
+    mock_assistant_cls.assert_not_called()

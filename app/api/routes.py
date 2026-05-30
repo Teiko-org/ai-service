@@ -1,7 +1,7 @@
 import logging
 import re
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form
 
 from app.api.deps import sanitize_input, check_prompt_injection, check_content_policy, validate_auth_token
 from app.config import settings
@@ -71,6 +71,30 @@ _BATCH_DATE_RANGE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ALLOWED_AUDIO_MIME = frozenset(
+    {
+        "audio/webm",
+        "audio/wav",
+        "audio/x-wav",
+        "audio/mpeg",
+        "audio/mp3",
+        "audio/mp4",
+        "audio/m4a",
+        "audio/ogg",
+        "audio/x-m4a",
+    }
+)
+_MAX_AUDIO_BYTES = 10 * 1024 * 1024
+
+_AUDIO_EXT_MIME = {
+    "webm": "audio/webm",
+    "wav": "audio/wav",
+    "mp3": "audio/mpeg",
+    "m4a": "audio/mp4",
+    "mp4": "audio/mp4",
+    "ogg": "audio/ogg",
+}
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
 
@@ -87,6 +111,68 @@ _WHATSAPP_INTENT_RE = re.compile(
 
 def _user_requested_report(question: str) -> bool:
     return bool(_REPORT_INTENT_RE.search(question or ""))
+
+
+def _normalize_audio_mime(content_type: str | None, filename: str | None) -> str:
+    raw = (content_type or "").split(";")[0].strip().lower()
+    if raw in _ALLOWED_AUDIO_MIME:
+        return raw
+    if filename and "." in filename:
+        ext = filename.rsplit(".", 1)[-1].lower()
+        return _AUDIO_EXT_MIME.get(ext, raw or "audio/webm")
+    return raw or "audio/webm"
+
+
+def _build_ask_response(
+    session_id: str,
+    question: str,
+    result: dict,
+    *,
+    transcription: str | None = None,
+) -> AskResponse:
+    pending = result.get("pending_confirmation")
+    if isinstance(pending, dict) and (pending.get("message") or "").strip():
+        result["answer"] = pending["message"].strip()
+
+    session_store.append(session_id, "user", question)
+    session_store.append(session_id, "assistant", result["answer"])
+
+    attachments: list[Attachment] = []
+    should_attach_report = (
+        REPORT_TOOL_NAME in result["tools_used"]
+        or _user_requested_report(question)
+    )
+    if should_attach_report:
+        if REPORT_TOOL_NAME not in result["tools_used"]:
+            logger.info(
+                "Modelo nao chamou %s mas pergunta pediu relatorio; anexando PDF por fallback.",
+                REPORT_TOOL_NAME,
+            )
+        attachments.append(
+            Attachment(
+                type="pdf_report",
+                label="Baixar relatório de insights",
+                endpoint=REPORT_ENDPOINT,
+                filename=REPORT_FILENAME,
+            )
+        )
+
+    pending = result.get("pending_confirmation")
+    pending_model = (
+        PendingConfirmation(**pending) if isinstance(pending, dict) else None
+    )
+    session_store.set_pending_confirmation(
+        session_id, pending if isinstance(pending, dict) else None
+    )
+
+    return AskResponse(
+        answer=result["answer"],
+        tools_used=result["tools_used"],
+        session_id=session_id,
+        attachments=attachments,
+        pending_confirmation=pending_model,
+        transcription=transcription,
+    )
 
 
 def _user_requested_whatsapp(question: str) -> bool:
@@ -624,47 +710,132 @@ async def ask_question(body: AskRequest, request: Request):
 
     await _apply_whatsapp_answer_fallback(question, token, result)
 
-    pending = result.get("pending_confirmation")
-    if isinstance(pending, dict) and (pending.get("message") or "").strip():
-        result["answer"] = pending["message"].strip()
+    return _build_ask_response(session.id, question, result)
 
-    session_store.append(session.id, "user", question)
-    session_store.append(session.id, "assistant", result["answer"])
 
-    attachments: list[Attachment] = []
-    should_attach_report = (
-        REPORT_TOOL_NAME in result["tools_used"]
-        or _user_requested_report(question)
-    )
-    if should_attach_report:
-        if REPORT_TOOL_NAME not in result["tools_used"]:
-            logger.info(
-                "Modelo nao chamou %s mas pergunta pediu relatorio; anexando PDF por fallback.",
-                REPORT_TOOL_NAME,
-            )
-        attachments.append(
-            Attachment(
-                type="pdf_report",
-                label="Baixar relatório de insights",
-                endpoint=REPORT_ENDPOINT,
-                filename=REPORT_FILENAME,
-            )
+@router.post("/ask/audio", response_model=AskResponse)
+@limiter.limit("10/minute")
+async def ask_audio(
+    request: Request,
+    audio: UploadFile = File(...),
+    session_id: str | None = Form(default=None),
+):
+    token = await validate_auth_token(request)
+
+    session = session_store.get_or_create(session_id)
+    history = session_store.get_history(session.id, limit=10)
+
+    audio_bytes = await audio.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Arquivo de audio vazio.")
+    if len(audio_bytes) > _MAX_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail="Audio muito grande. Maximo 10 MB.",
         )
 
-    pending = result.get("pending_confirmation")
-    pending_model = (
-        PendingConfirmation(**pending) if isinstance(pending, dict) else None
-    )
-    session_store.set_pending_confirmation(
-        session.id, pending if isinstance(pending, dict) else None
-    )
+    mime_type = _normalize_audio_mime(audio.content_type, audio.filename)
+    if mime_type not in _ALLOWED_AUDIO_MIME:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Formato de audio nao suportado: {mime_type or 'desconhecido'}.",
+        )
 
-    return AskResponse(
-        answer=result["answer"],
-        tools_used=result["tools_used"],
-        session_id=session.id,
-        attachments=attachments,
-        pending_confirmation=pending_model,
+    assistant = CarambolosAssistant(auth_token=token)
+
+    try:
+        transcription = await assistant.transcribe_audio(audio_bytes, mime_type)
+    except RateLimitError as exc:
+        logger.warning("Rate limit Gemini (transcricao): %s", exc)
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Erro ao transcrever audio: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao transcrever o audio.",
+        ) from exc
+
+    question = sanitize_input(transcription)
+    if not question.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Nao foi possivel entender o audio. Tente falar mais perto do microfone.",
+        )
+    check_prompt_injection(question)
+    check_content_policy(question)
+
+    fast_commit = await _try_commit_stored_pending(
+        question, session.id, history, token
+    )
+    if fast_commit is None:
+        fast_commit = await _try_batch_conflict_fast_path(
+            question,
+            [*history, {"role": "user", "content": question}],
+            token,
+        )
+    if fast_commit is not None:
+        session_store.append(session.id, "user", question)
+        session_store.append(session.id, "assistant", fast_commit["answer"])
+        pending_raw = fast_commit.get("pending_confirmation")
+        if isinstance(pending_raw, dict):
+            session_store.set_pending_confirmation(session.id, pending_raw)
+        pending_model = (
+            PendingConfirmation(**pending_raw)
+            if isinstance(pending_raw, dict)
+            else _pending_model_from_session(session.id)
+        )
+        if pending_model is None and not fast_commit.get("ok"):
+            pending_model = _pending_model_from_session(session.id)
+        return AskResponse(
+            answer=fast_commit["answer"],
+            tools_used=fast_commit["tools_used"],
+            session_id=session.id,
+            attachments=[],
+            pending_confirmation=pending_model,
+            transcription=question,
+        )
+
+    history_with_current = [*history, {"role": "user", "content": question}]
+    session_token = current_session_id.set(session.id)
+    history_token = current_history.set(history_with_current)
+    try:
+        result = await assistant.ask_audio(audio_bytes, mime_type, history=history)
+    except RateLimitError as exc:
+        logger.warning("Rate limit Gemini (audio): %s", exc)
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        msg = str(exc).lower()
+        if "high demand" in msg or "try again" in msg:
+            logger.warning("Gemini indisponivel (demanda): %s", exc)
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "A IA esta com alta demanda no momento. "
+                    "Aguarde alguns segundos e tente novamente."
+                ),
+            ) from exc
+        logger.error("Erro no assistente (audio): %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao processar o audio.",
+        ) from exc
+    except Exception as exc:
+        logger.error("Erro no assistente (audio): %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao processar o audio.",
+        ) from exc
+    finally:
+        current_history.reset(history_token)
+        current_session_id.reset(session_token)
+
+    await _apply_whatsapp_answer_fallback(question, token, result)
+
+    return _build_ask_response(
+        session.id,
+        question,
+        result,
+        transcription=question,
     )
 
 
