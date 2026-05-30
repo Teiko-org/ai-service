@@ -46,6 +46,10 @@ class AskResponse(BaseModel):
     session_id: str
     attachments: list[Attachment] = Field(default_factory=list)
     pending_confirmation: PendingConfirmation | None = None
+    transcription: str | None = Field(
+        default=None,
+        description="Transcricao da pergunta em audio (Modo Expediente).",
+    )
 
 
 class InsightRequest(BaseModel):
