@@ -895,6 +895,25 @@ async def get_alerts(request: Request, refresh: bool = False):
 
 SUGGESTED_PROMPTS = [
     SuggestedPrompt(
+        label="Produção pendente",
+        prompt="Quais massas e recheios estão pendentes na produção?",
+        icon="clock",
+    ),
+    SuggestedPrompt(
+        label="WhatsApp do pedido",
+        prompt="Gera a mensagem de WhatsApp do pedido #9",
+        icon="message-circle",
+    ),
+    SuggestedPrompt(
+        label="Criar pedido de bolo",
+        prompt=(
+            "Cria pedido de bolo: cliente Maria Silva, tel 11988887777, "
+            "massa Cacau, recheio ninho, tamanho 12, formato circulo, "
+            "retirada dia 10/06/2026 as 17:00"
+        ),
+        icon="cake",
+    ),
+    SuggestedPrompt(
         label="Como estão os cancelamentos?",
         prompt=(
             "Gostaria de saber como estao os cancelamentos recentes. "
@@ -917,14 +936,6 @@ SUGGESTED_PROMPTS = [
             "Qual o percentual de aproveitamento e valor arrecadado?"
         ),
         icon="flame",
-    ),
-    SuggestedPrompt(
-        label="Produção pendente",
-        prompt=(
-            "Quais massas e recheios estao pendentes para producao? "
-            "Existem pedidos com entrega proxima que precisam de atencao?"
-        ),
-        icon="clock",
     ),
     SuggestedPrompt(
         label="Tendências de vendas",

@@ -138,6 +138,14 @@ def test_suggested_prompts():
     assert len(first["prompt"]) > len(first["label"])
 
 
+def test_suggested_prompts_live_demo_v1_v2_v3():
+    resp = client.get("/api/v1/suggested-prompts")
+    top = resp.json()["prompts"][:3]
+    assert "pendentes na produção" in top[0]["prompt"]
+    assert "WhatsApp" in top[1]["prompt"]
+    assert "Cria pedido de bolo" in top[2]["prompt"]
+
+
 def test_models_status():
     resp = client.get("/api/v1/models-status")
     assert resp.status_code == 200
